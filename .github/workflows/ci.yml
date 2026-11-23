@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cross:
+    name: cross-compile (6 targets)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          cache: true
+
+      - name: Build all targets
+        run: zig build cross -Doptimize=ReleaseSafe
+
+      - name: Check binary formats
+        run: |
+          set -euo pipefail
+          check() {
+            local out
+            out=$(file -b "$1")
+            echo "$1: $out"
+            if ! grep -Eq "$2" <<<"$out"; then
+              echo "::error file=$1::expected /$2/"
+              return 1
+            fi
+          }
+          check zig-out/linux-x86_64/temui      '^ELF 64-bit LSB .*x86-64.*dynamically linked'
+          check zig-out/linux-aarch64/temui     '^ELF 64-bit LSB .*ARM aarch64.*dynamically linked'
+          check zig-out/macos-x86_64/temui      '^Mach-O 64-bit executable x86_64'
+          check zig-out/macos-aarch64/temui     '^Mach-O 64-bit executable arm64'
+          check zig-out/windows-x86_64/temui.exe  '^PE32\+ executable .*x86-64'
+          check zig-out/windows-aarch64/temui.exe '^PE32\+ executable .*Aarch64'
+
+      - name: Check glibc floor (2.28)
+        run: |
+          set -euo pipefail
+          for bin in zig-out/linux-x86_64/temui zig-out/linux-aarch64/temui; do
+            readelf -d "$bin" | grep -q 'NEEDED.*\[libc\.so\.6\]' \
+              || { echo "::error file=$bin::no NEEDED libc.so.6"; exit 1; }
+            max=$(readelf -V "$bin" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+            echo "$bin: max GLIBC_$max"
+            if [ "$(printf '%s\n2.28\n' "$max" | sort -V | tail -1)" != "2.28" ]; then
+              echo "::error file=$bin::requires GLIBC_$max (> 2.28)"
+              exit 1
+            fi
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: temui-linux-x86_64
+          path: zig-out/linux-x86_64/temui
+          retention-days: 14
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: temui-linux-aarch64
+          path: zig-out/linux-aarch64/temui
+          retention-days: 14
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: temui-macos-x86_64
+          path: zig-out/macos-x86_64/temui
+          retention-days: 14
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: temui-macos-aarch64
+          path: zig-out/macos-aarch64/temui
+          retention-days: 14
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: temui-windows-x86_64
+          path: zig-out/windows-x86_64/temui.exe
+          retention-days: 14
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: temui-windows-aarch64
+          path: zig-out/windows-aarch64/temui.exe
+          retention-days: 14
+          if-no-files-found: error
+
+  test:
+    name: test (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x86_64, runner: ubuntu-24.04 }
+          - { target: linux-aarch64, runner: ubuntu-24.04-arm }
+          - { target: macos-aarch64, runner: macos-15 }
+          - { target: macos-x86_64, runner: macos-15-intel }
+          - { target: windows-x86_64, runner: windows-2025 }
+          - { target: windows-aarch64, runner: windows-11-arm }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          cache: true
+
+      - name: Unit tests
+        run: zig build test --summary all
+
+      - name: Build
+        run: zig build
+
+      - name: Logging smoke test
+        run: |
+          set -eo pipefail
+          version=$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)
+          log_dir=$(zig-out/bin/temui --help | sed -n 's/^Logs: //p')
+          [ -n "$log_dir" ] || { echo "::error::no 'Logs:' line in --help"; exit 1; }
+          if [ "$RUNNER_OS" = Windows ]; then log_dir=$(cygpath -u "$log_dir"); fi
+          echo "log dir: $log_dir"
+
+          list_logs() { { ls "$log_dir" 2>/dev/null || true; } | { grep -E '^temui-.*\.log$' || true; } | sort; }
+          list_logs > "$RUNNER_TEMP/before.txt"
+
+          zig-out/bin/temui --verbose --version > "$RUNNER_TEMP/stdout.txt"
+          printf 'temui %s\n' "$version" > "$RUNNER_TEMP/expected.txt"
+          diff "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/stdout.txt" \
+            || { echo "::error::stdout is not exactly 'temui $version'"; exit 1; }
+
+          list_logs > "$RUNNER_TEMP/after.txt"
+          comm -13 "$RUNNER_TEMP/before.txt" "$RUNNER_TEMP/after.txt" > "$RUNNER_TEMP/new.txt"
+          if [ "$(( $(wc -l < "$RUNNER_TEMP/new.txt") ))" -ne 1 ]; then
+            echo "::error::expected exactly one new log file, got:"; cat "$RUNNER_TEMP/new.txt"; exit 1
+          fi
+          new="$log_dir/$(cat "$RUNNER_TEMP/new.txt")"
+          echo "new log file: $new"; cat "$new"
+          grep -q "debug(default): temui $version " "$new" \
+            || { echo "::error::startup line missing from $new"; exit 1; }
