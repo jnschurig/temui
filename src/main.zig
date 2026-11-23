@@ -42,6 +42,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = cli;
     _ = paths;
+    _ = @import("log_files.zig");
 }
 
 test "vendored libretro.h translates" {
