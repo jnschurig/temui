@@ -1,0 +1,13 @@
+.{
+    .name = .temui,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.1",
+    .fingerprint = 0xe0a1ba1fe7564114,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "vendor",
+        "LICENSE",
+    },
+}
