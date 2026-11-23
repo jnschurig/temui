@@ -1,11 +1,41 @@
 const std = @import("std");
+const build_options = @import("build_options");
+const cli = @import("cli.zig");
 
-pub fn main(init: std.process.Init) !void {
-    _ = init;
+pub fn main(init: std.process.Init) !u8 {
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_fw: std.Io.File.Writer = .initStreaming(.stdout(), io, &stdout_buf);
+    const stdout = &stdout_fw.interface;
+
+    // TODO(step 4): real per-OS log directory.
+    const log_dir = "(not yet configured)";
+
+    const opts = switch (cli.parse(args[1..])) {
+        .ok => |o| o,
+        .err => |e| {
+            var stderr_buf: [512]u8 = undefined;
+            var stderr_fw: std.Io.File.Writer = .initStreaming(.stderr(), io, &stderr_buf);
+            try e.write(&stderr_fw.interface);
+            try stderr_fw.interface.flush();
+            return 2;
+        },
+    };
+
+    switch (opts.command) {
+        // No ROM browser yet (item 08), so bare `temui` shows usage.
+        .none, .help => try cli.usage(stdout, log_dir),
+        .version => try stdout.print("temui {s}\n", .{build_options.version}),
+    }
+    try stdout.flush();
+    return 0;
 }
 
 test {
     std.testing.refAllDecls(@This());
+    _ = cli;
 }
 
 test "vendored libretro.h translates" {
