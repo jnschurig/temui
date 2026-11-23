@@ -47,6 +47,13 @@ fn makeExe(
     const options = b.addOptions();
     options.addOption([]const u8, "version", zon.version);
 
+    // Zig 0.17 has no @cImport; C headers are translated by the build system.
+    const libretro = b.addTranslateC(.{
+        .root_source_file = b.path("vendor/libretro/libretro.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -55,6 +62,7 @@ fn makeExe(
         .link_libc = target.result.os.tag != .windows,
         .imports = &.{
             .{ .name = "build_options", .module = options.createModule() },
+            .{ .name = "libretro", .module = libretro.createModule() },
         },
     });
 
