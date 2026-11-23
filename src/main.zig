@@ -1,6 +1,8 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const cli = @import("cli.zig");
+const paths = @import("paths.zig");
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
@@ -10,8 +12,11 @@ pub fn main(init: std.process.Init) !u8 {
     var stdout_fw: std.Io.File.Writer = .initStreaming(.stdout(), io, &stdout_buf);
     const stdout = &stdout_fw.interface;
 
-    // TODO(step 4): real per-OS log directory.
-    const log_dir = "(not yet configured)";
+    const env = paths.envFromProcess(init.environ_map);
+    const log_dir: []const u8 = paths.logDir(init.arena.allocator(), builtin.os.tag, env) catch |err| switch (err) {
+        error.NoHomeDirectory => "(unavailable: home directory not set)",
+        error.OutOfMemory => return err,
+    };
 
     const opts = switch (cli.parse(args[1..])) {
         .ok => |o| o,
@@ -36,6 +41,7 @@ pub fn main(init: std.process.Init) !u8 {
 test {
     std.testing.refAllDecls(@This());
     _ = cli;
+    _ = paths;
 }
 
 test "vendored libretro.h translates" {
