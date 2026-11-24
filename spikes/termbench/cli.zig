@@ -197,6 +197,9 @@ pub fn usage(w: *std.Io.Writer) !void {
         \\  -v, --verbose       debug logging
         \\  -h, --help          this help
         \\
+        \\Photosensitivity warning: the default matrix can flash rapidly (single-id kitty
+        \\frames flickered in Ghostty 1.4.0). Use --double-buffer, --fps 60, or a small window.
+        \\
     );
 }
 

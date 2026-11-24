@@ -72,7 +72,9 @@ pub const Encoder = struct {
     /// file only: `$TMPDIR` with a trailing slash.
     tmpdir: []const u8,
     pid: c.pid_t,
-    image_id: u32 = 1,
+    /// Alternate image ids 1 and 2, deleting the other id's placement after
+    /// each frame, so the terminal never shows a frame with no image.
+    double_buffer: bool = false,
     /// Frames encoded; also the name counter for file/shm objects.
     frames: u64 = 0,
     /// file/shm objects for frames below this were already unlinked.
@@ -114,9 +116,10 @@ pub const Encoder = struct {
         e.out.clearRetainingCapacity();
         const n = e.frames;
         e.frames += 1;
+        const id: u32 = if (e.double_buffer) 1 + @as(u32, @intCast(n % 2)) else 1;
 
         try e.out.print(gpa, "\x1b[{d};{d}H\x1b_Ga=T,i={d},p=1,q=1,C=1,c={d},r={d},f={d},s={d},v={d}", .{
-            p.row, p.col, e.image_id, p.cols, p.rows, fmt.bpp() * 8, w, h,
+            p.row, p.col, id, p.cols, p.rows, fmt.bpp() * 8, w, h,
         });
         switch (e.kind) {
             .inline_rgb, .inline_rgba => try e.appendChunked(pixels),
@@ -139,6 +142,9 @@ pub const Encoder = struct {
                 try e.appendChunked(name);
             },
         }
+        // The new frame is placed; now drop the previous one (q=2: the first
+        // frame has nothing to delete).
+        if (e.double_buffer) try e.out.print(gpa, "\x1b_Ga=d,d=i,i={d},q=2\x1b\\", .{3 - id});
         return e.out.items;
     }
 
@@ -288,6 +294,20 @@ test "single-chunk payload has no m key" {
     defer e.deinit();
     const out = try e.encode(&.{ 1, 2, 3, 255 }, 1, 1, test_place);
     try testing.expectEqualStrings("\x1b[1;3H\x1b_Ga=T,i=1,p=1,q=1,C=1,c=40,r=20,f=32,s=1,v=1;AQID/w==\x1b\\", out);
+}
+
+test "double buffer alternates ids and deletes the previous placement" {
+    const gpa = testing.allocator;
+    var e = try Encoder.init(gpa, .inline_rgba, 4, "/tmp");
+    defer e.deinit();
+    e.double_buffer = true;
+    const px = [_]u8{ 1, 2, 3, 255 };
+    const head = "\x1b[1;3H\x1b_Ga=T,i={d},p=1,q=1,C=1,c=40,r=20,f=32,s=1,v=1;AQID/w==\x1b\\\x1b_Ga=d,d=i,i={d},q=2\x1b\\";
+    var buf: [128]u8 = undefined;
+    for ([_][2]u32{ .{ 1, 2 }, .{ 2, 1 }, .{ 1, 2 } }) |ids| {
+        const out = try e.encode(&px, 1, 1, test_place);
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&buf, head, .{ ids[0], ids[1] }), out);
+    }
 }
 
 test "zlib payload round-trips" {

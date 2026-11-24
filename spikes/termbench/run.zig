@@ -66,6 +66,7 @@ const Header = struct {
         max_inflight: u32,
         ack_timeout_s: f64,
         overlay: bool,
+        double_buffer: bool,
     },
     detect: detect.Result,
 };
@@ -162,6 +163,7 @@ const Runner = struct {
         var area_rows: u32 = 0;
         if (kind) |k| {
             kenc = try kitty.Encoder.init(gpa, k, loop.frame_len, r.tmpdir);
+            kenc.?.double_buffer = opts.double_buffer;
             placement = kitty.place(r.size, w, h, status_rows);
             area_cols = placement.cols;
             area_rows = placement.rows;
@@ -370,7 +372,7 @@ pub fn main(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, env: *cons
         .winsize = size,
         .cell_px = if (size.px_w == 0) null else .{ size.cellW(), size.cellH() },
         .term_procs = disc,
-        .options = .{ .duration_s = opts.duration_s, .fps = opts.fps, .max_inflight = opts.max_inflight, .ack_timeout_s = opts.ack_timeout_s, .overlay = opts.overlay },
+        .options = .{ .duration_s = opts.duration_s, .fps = opts.fps, .max_inflight = opts.max_inflight, .ack_timeout_s = opts.ack_timeout_s, .overlay = opts.overlay, .double_buffer = opts.double_buffer },
         .detect = det,
     };
     try writeLine(jw, header);

@@ -1,0 +1,93 @@
+{
+  "env": {
+    "TERM": "xterm-256color",
+    "TERM_PROGRAM": "rex",
+    "TERM_PROGRAM_VERSION": "0.1.0-preview.19",
+    "COLORTERM": "truecolor"
+  },
+  "winsize": {
+    "cols": 225,
+    "rows": 68,
+    "px_w": 3375,
+    "px_h": 1972
+  },
+  "xtversion": "rex 0.1.0-preview.19",
+  "kitty_graphics": true,
+  "kitty_keyboard_flags": 0,
+  "truecolor_decrqss": true,
+  "truecolor_env": true,
+  "cell_px": [
+    29,
+    15
+  ],
+  "text_area_px": [
+    1972,
+    3375
+  ],
+  "max_latency_ms": 0.052,
+  "queries": [
+    {
+      "name": "da1 (baseline)",
+      "sent": "",
+      "answered": true,
+      "reply": "\\e[?62;22c",
+      "latency_ms": 0.048,
+      "sentinel": true,
+      "sentinel_ms": 0.048
+    },
+    {
+      "name": "kitty graphics a=q",
+      "sent": "\\e_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\e\\",
+      "answered": true,
+      "reply": "\\e_Gi=31;OK\\e\\",
+      "latency_ms": 0.052,
+      "sentinel": true,
+      "sentinel_ms": 0.052
+    },
+    {
+      "name": "kitty keyboard CSI ? u",
+      "sent": "\\e[?u",
+      "answered": true,
+      "reply": "\\e[?0u",
+      "latency_ms": 0.025,
+      "sentinel": true,
+      "sentinel_ms": 0.025
+    },
+    {
+      "name": "DECRQSS SGR truecolor",
+      "sent": "\\e[48:2::1:2:3m\\eP$qm\\e\\\\e[0m",
+      "answered": true,
+      "reply": "\\eP1$r0;48:2::1:2:3m\\e\\",
+      "latency_ms": 0.036,
+      "sentinel": true,
+      "sentinel_ms": 0.036
+    },
+    {
+      "name": "text area px CSI 14 t",
+      "sent": "\\e[14t",
+      "answered": true,
+      "reply": "\\e[4;1972;3375t",
+      "latency_ms": 0.027,
+      "sentinel": true,
+      "sentinel_ms": 0.027
+    },
+    {
+      "name": "cell px CSI 16 t",
+      "sent": "\\e[16t",
+      "answered": true,
+      "reply": "\\e[6;29;15t",
+      "latency_ms": 0.029,
+      "sentinel": true,
+      "sentinel_ms": 0.029
+    },
+    {
+      "name": "XTVERSION CSI > q",
+      "sent": "\\e[>0q",
+      "answered": true,
+      "reply": "\\eP>|rex 0.1.0-preview.19\\e\\",
+      "latency_ms": 0.03,
+      "sentinel": true,
+      "sentinel_ms": 0.03
+    }
+  ]
+}
