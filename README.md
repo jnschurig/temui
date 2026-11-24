@@ -25,7 +25,7 @@ It ships as one binary for Linux, macOS and Windows on x86_64 and aarch64, with 
 
 ## Status
 
-Pre-alpha: the build, CLI skeleton, file logging and CI are in place; nothing plays games yet.
+Pre-alpha: temui can load a libretro core and run it headless, dumping frames to image files (see [Running a core headless](#running-a-core-headless)); nothing is drawn in the terminal yet.
 
 - [Architecture decisions](docs/decisions.md): what was chosen and why (D1–D15).
 - [Roadmap](docs/roadmap.md): ordered work items, each with a seed prompt in [`docs/roadmap/`](docs/roadmap/).
@@ -40,6 +40,17 @@ zig build                                 # native binary: zig-out/bin/temui
 zig build test                            # unit tests
 zig build cross -Doptimize=ReleaseSafe    # all six targets: zig-out/<os>-<arch>/
 ```
+
+## Running a core headless
+
+`temui run --headless` loads a core and a ROM, runs a fixed number of frames as fast as possible, and can write frames out as PPM images. It is a test harness for the libretro host; there is no display or input yet, and you supply the core yourself.
+
+```sh
+temui run --headless --core snes9x_libretro.dylib --rom game.sfc --frames 600 \
+    --dump-ppm frames/ --dump-every 60 --option snes9x_region=ntsc
+```
+
+It prints one summary line (core name and version, frames run, final geometry, pixel format). `temui --help` lists every option. `zig build` also builds a small test core, `zig-out/lib/temui_test_libretro.{dylib,so}` (`zig-out/bin/temui_test_libretro.dll` on Windows), which runs with `--rom testdata/testcore.rom`.
 
 ## Logs
 

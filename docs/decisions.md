@@ -48,7 +48,7 @@ Status: accepted 2026-11-23. Facts marked *verified* were checked on that date (
 
 ## D3: Cores — runtime-loaded, software framebuffer only
 
-**Decision.** Load cores at runtime with `dlopen` / `LoadLibrary` (Zig `std.DynLib`) and drive them through the libretro C API. Support only software framebuffers in 0RGB1555, RGB565 and XRGB8888. OpenGL/Vulkan hardware-rendered cores are out of scope.
+**Decision.** Load cores at runtime with `dlopen` / `LoadLibrary` (a small in-repo wrapper, `src/libretro/DynLib.zig`: Zig 0.17.1's `std.DynLib` has no Windows backend and drops `dlerror()`) and drive them through the libretro C API. Support only software framebuffers in 0RGB1555, RGB565 and XRGB8888. OpenGL/Vulkan hardware-rendered cores are out of scope.
 
 **Rationale.** The libretro API gives access to dozens of emulators through one interface. A terminal can only show CPU-side pixels anyway, so hardware rendering would mean an offscreen GPU context plus readback, with a large dependency cost.
 
@@ -60,6 +60,10 @@ Status: accepted 2026-11-23. Facts marked *verified* were checked on that date (
 **Risks / open questions.**
 - Cores that keep global state cannot run twice in one process. Mitigation: one process per instance (D5).
 - Which environment callbacks to implement: start minimal, and add more as each real core needs them.
+- **Observed 2026-11-24** (`temui run --headless`, 600 frames, `--verbose`; both cores render correctly with the host from [03](roadmap/03-libretro-host-and-test-core.md)):
+  - *snes9x 1.63* handled: `SET_VARIABLES`, `GET_VARIABLE`, `GET_VARIABLE_UPDATE` (every frame), `GET_CORE_OPTIONS_VERSION`, `SET_PIXEL_FORMAT` (RGB565), `SET_GEOMETRY`, `SET_INPUT_DESCRIPTORS`, `GET_LOG_INTERFACE`, `GET_SYSTEM_DIRECTORY`, `GET_SAVE_DIRECTORY`. Unsupported, no visible effect: `GET_AUDIO_VIDEO_ENABLE` (every frame), `GET_VFS_INTERFACE`, `GET_INPUT_BITMASKS`, `SET_SUBSYSTEM_INFO`, `SET_CONTROLLER_INFO`, `SET_PERFORMANCE_LEVEL`, `SET_SUPPORT_ACHIEVEMENTS`.
+  - *Gambatte v0.5.0* handled: `SET_VARIABLES`, `GET_VARIABLE`, `GET_VARIABLE_UPDATE`, `GET_CORE_OPTIONS_VERSION`, `SET_PIXEL_FORMAT` (RGB565), `SET_INPUT_DESCRIPTORS`, `GET_LOG_INTERFACE`, `GET_SYSTEM_DIRECTORY`, `GET_CAN_DUPE`. Unsupported, no visible effect: `GET_VFS_INTERFACE`, `GET_INPUT_BITMASKS`, `GET_RUMBLE_INTERFACE`, `GET_LANGUAGE`, `GET_MESSAGE_INTERFACE_VERSION`, `SET_VARIABLE`, `SET_MEMORY_MAPS`, `SET_FASTFORWARDING_OVERRIDE`, `SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK`, `SET_PERFORMANCE_LEVEL`, `SET_SUPPORT_ACHIEVEMENTS`.
+  - Likely next: `GET_INPUT_BITMASKS` (both ask; saves 16 `input_state` calls per frame) and `GET_AUDIO_VIDEO_ENABLE` (snes9x asks every frame; useful for run-ahead or skipping video in fast-forward).
 
 **Roadmap.** [03-libretro-host-and-test-core](roadmap/03-libretro-host-and-test-core.md).
 
@@ -280,7 +284,8 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 - *stderr logging:* still shares the terminal.
 - *A log pane in the TUI:* possible later, but the file log comes first.
 
-**Risks / open questions.** None.
+**Risks / open questions.**
+- Cores can write to stdout themselves: snes9x 1.63 `printf`s `Map_HiROMMap` while loading a HiROM game, which would corrupt the display. Mitigation (to decide in [05](roadmap/05-play-loop.md)): before loading a core, `dup` fd 1 to a private descriptor for terminal output and point fd 1 (and fd 2) at the log file or the null device.
 
 **Roadmap.** [01-scaffold](roadmap/01-scaffold.md) (file logging), [05-play-loop](roadmap/05-play-loop.md) (overlay).
 
@@ -357,6 +362,7 @@ tmux is best-effort: kitty graphics needs `allow-passthrough`, and half-block wo
 | Windows AF_UNIX works at runtime from Zig std | supported in source; untested | [12](roadmap/12-control-protocol-and-registry.md) (fallback: named pipes) |
 | Cross-platform shared memory for frames | open | [12](roadmap/12-control-protocol-and-registry.md) |
 | SDL3 gamepad-only static build on all six targets | open | [15](roadmap/15-gamepad.md) |
+| Cores writing to stdout corrupt the display (snes9x does; D13) | open | [05](roadmap/05-play-loop.md) |
 | Timer precision on Windows | open | [05](roadmap/05-play-loop.md) |
 | Buildbot coverage of the six targets | **verified** — see below | — |
 
