@@ -15,6 +15,7 @@ const detect = @import("detect.zig");
 const reader = @import("reader.zig");
 const replies = @import("replies.zig");
 const util = @import("util.zig");
+const procstat = @import("procstat.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .debug,
@@ -56,6 +57,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer log.deinit();
     std.log.info("termbench ({s}) args: {f}", .{ build_options.optimize, std.json.fmt(args[1..], .{}) });
 
+    if (opts.command == .procs) return runProcs(arena, opts, out);
+
     _ = term.size() catch {
         try stderr.writeAll("termbench: stdout is not a terminal\n");
         try stderr.flush();
@@ -66,7 +69,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer term.restore();
 
     switch (opts.command) {
-        .help => unreachable,
+        .help, .procs => unreachable,
         .detect => return runDetect(io, arena, init.environ_map, opts, out),
         .run => {
             // Placeholder until the run loop exists (step 6).
@@ -76,6 +79,19 @@ pub fn main(init: std.process.Init) !u8 {
             return 0;
         },
     }
+}
+
+fn runProcs(arena: std.mem.Allocator, opts: cli.Options, out: *std.Io.Writer) !u8 {
+    const d = try procstat.discover(arena, opts.term_pids[0..opts.term_pid_count]);
+    std.log.info("procs: {f}", .{std.json.fmt(d, .{})});
+    try out.print("method: {t}\n", .{d.method});
+    for (d.procs) |p| try out.print("  {d}  {s}\n", .{ p.pid, p.name });
+    const a = procstat.cpuNs(d.procs);
+    term.sleepNs(std.time.ns_per_s);
+    const b = procstat.cpuNs(d.procs);
+    try out.print("terminal CPU over 1 s: {d:.1}%\n", .{@as(f64, @floatFromInt(b - a)) / std.time.ns_per_s * 100});
+    try out.flush();
+    return if (d.procs.len == 0) 1 else 0;
 }
 
 fn runDetect(io: std.Io, arena: std.mem.Allocator, env: *const std.process.Environ.Map, opts: cli.Options, out: *std.Io.Writer) !u8 {
@@ -112,6 +128,7 @@ test {
     _ = reader;
     _ = detect;
     _ = util;
+    _ = procstat;
     _ = @import("scene.zig");
     _ = @import("stats.zig");
     _ = @import("kitty.zig");

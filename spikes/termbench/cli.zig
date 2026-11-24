@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-pub const Command = enum { run, detect, help };
+pub const Command = enum { run, detect, procs, help };
 
 pub const Res = enum {
     @"256x224",
@@ -90,6 +90,10 @@ pub fn parse(args: []const [:0]const u8) Result {
             o.command = .detect;
             continue;
         }
+        if (first and eql(arg, "procs")) {
+            o.command = .procs;
+            continue;
+        }
         if (eql(arg, "-h") or eql(arg, "--help")) {
             o.command = .help;
             continue;
@@ -175,6 +179,7 @@ pub fn usage(w: *std.Io.Writer) !void {
         \\Usage:
         \\  termbench [run] [options]   run the benchmark matrix in this terminal
         \\  termbench detect [options]  probe terminal capabilities
+        \\  termbench procs [options]   show the terminal processes CPU is sampled from
         \\
         \\Options:
         \\  --duration S        seconds per cell (default 10)
