@@ -93,6 +93,8 @@ test {
     _ = @import("term/replies.zig");
     _ = @import("term/caps.zig");
     _ = @import("render/layout.zig");
+    _ = @import("render/sgr.zig");
+    _ = @import("render/halfblock.zig");
 }
 
 test "vendored libretro.h translates" {

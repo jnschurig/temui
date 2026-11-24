@@ -1,0 +1,244 @@
+//! Half-block truecolor backend (D7): each cell shows two vertically stacked
+//! pixels, `▀` with fg = top and bg = bottom. The frame is area-averaged to
+//! the fitted box (cols × 2·rows pixels). Only cells that changed since the
+//! last `present` are redrawn; the first frame and any rect, box or cell-size
+//! change redraw everything and clear the margin.
+
+const std = @import("std");
+const layout = @import("layout.zig");
+const sgr = @import("sgr.zig");
+const CellPx = @import("../term/caps.zig").CellPx;
+
+const Rect = layout.Rect;
+const Frame = layout.Frame;
+const Rgb = sgr.Rgb;
+
+/// Changed runs separated by at most this many unchanged cells are merged:
+/// re-sending a few cells is cheaper than another cursor move.
+const merge_gap = 2;
+
+const Cell = struct {
+    top: Rgb,
+    bot: Rgb,
+
+    fn eql(a: Cell, b: Cell) bool {
+        return std.mem.eql(u8, &a.top, &b.top) and std.mem.eql(u8, &a.bot, &b.bot);
+    }
+};
+
+pub const HalfBlock = struct {
+    gpa: std.mem.Allocator,
+    cell_px: CellPx,
+    resampler: layout.Resampler,
+    /// Sampled pixels, `box.cols × 2·box.rows × 3`.
+    pixels: []u8 = &.{},
+    cur: []Cell = &.{},
+    prev: []Cell = &.{},
+    /// The rect and fitted box of the previous `present`; null forces a full
+    /// redraw.
+    last: ?struct { rect: Rect, box: Rect } = null,
+    pen: sgr.Pen = .{},
+
+    pub fn init(gpa: std.mem.Allocator, cell_px: CellPx) HalfBlock {
+        return .{ .gpa = gpa, .cell_px = cell_px, .resampler = .init(gpa) };
+    }
+
+    pub fn deinit(hb: *HalfBlock) void {
+        hb.resampler.deinit();
+        hb.gpa.free(hb.pixels);
+        hb.gpa.free(hb.cur);
+        hb.gpa.free(hb.prev);
+        hb.* = undefined;
+    }
+
+    /// Forget what is on screen: the next `present` redraws everything.
+    pub fn invalidate(hb: *HalfBlock) void {
+        hb.last = null;
+    }
+
+    pub fn setCellPx(hb: *HalfBlock, cell_px: CellPx) void {
+        hb.cell_px = cell_px;
+        hb.invalidate();
+    }
+
+    /// Draws `frame` into `rect`, letterboxed to `aspect` (default: the
+    /// frame's own width / height). An empty frame or rect draws nothing.
+    pub fn present(hb: *HalfBlock, w: *std.Io.Writer, frame: Frame, rect: Rect, aspect: ?f32) !void {
+        if (frame.isEmpty() or rect.isEmpty()) return;
+        const box = layout.fit(rect, hb.cell_px, aspect orelse frame.aspect());
+        if (box.isEmpty()) return;
+
+        const full = if (hb.last) |l| !std.meta.eql(l.rect, rect) or !std.meta.eql(l.box, box) else true;
+        const n = @as(usize, box.cols) * box.rows;
+        if (full) try hb.resize(n, box);
+
+        try hb.resampler.sample(frame.rgb, @intCast(frame.width), @intCast(frame.height), hb.pixels, box.cols, box.rows * 2);
+        const stride = @as(usize, box.cols) * 3;
+        for (0..box.rows) |y| {
+            const top = hb.pixels[(2 * y) * stride ..][0..stride];
+            const bot = hb.pixels[(2 * y + 1) * stride ..][0..stride];
+            for (hb.cur[y * box.cols ..][0..box.cols], 0..) |*c, x| {
+                c.* = .{ .top = top[x * 3 ..][0..3].*, .bot = bot[x * 3 ..][0..3].* };
+            }
+        }
+
+        hb.pen = .{};
+        var wrote = full;
+        if (full) try sgr.clearMargin(w, rect, box);
+        for (0..box.rows) |yi| {
+            const y: u32 = @intCast(yi);
+            const row = hb.cur[yi * box.cols ..][0..box.cols];
+            if (full) {
+                try hb.emitRun(w, box, y, row, 0, box.cols);
+                continue;
+            }
+            const old = hb.prev[yi * box.cols ..][0..box.cols];
+            var x: u32 = 0;
+            while (x < box.cols) {
+                if (row[x].eql(old[x])) {
+                    x += 1;
+                    continue;
+                }
+                var last = x;
+                var j = x + 1;
+                while (j < box.cols and j - last <= merge_gap) : (j += 1) {
+                    if (!row[j].eql(old[j])) last = j;
+                }
+                try hb.emitRun(w, box, y, row, x, last + 1);
+                wrote = true;
+                x = last + 1;
+            }
+        }
+        if (wrote) try w.writeAll(sgr.reset);
+        std.mem.swap([]Cell, &hb.cur, &hb.prev);
+        hb.last = .{ .rect = rect, .box = box };
+    }
+
+    fn resize(hb: *HalfBlock, n: usize, box: Rect) !void {
+        if (hb.cur.len != n) {
+            hb.gpa.free(hb.cur);
+            hb.cur = &.{};
+            hb.gpa.free(hb.prev);
+            hb.prev = &.{};
+            hb.cur = try hb.gpa.alloc(Cell, n);
+            hb.prev = try hb.gpa.alloc(Cell, n);
+        }
+        const px_len = @as(usize, box.cols) * box.rows * 2 * 3;
+        if (hb.pixels.len != px_len) {
+            hb.gpa.free(hb.pixels);
+            hb.pixels = &.{};
+            hb.pixels = try hb.gpa.alloc(u8, px_len);
+        }
+    }
+
+    fn emitRun(hb: *HalfBlock, w: *std.Io.Writer, box: Rect, y: u32, row: []const Cell, a: u32, b: u32) !void {
+        try sgr.cup(w, box.row + y, box.col + a);
+        for (row[a..b]) |cell| {
+            if (std.mem.eql(u8, &cell.top, &cell.bot)) {
+                // One colour: a space on the current bg, or a full block on
+                // the current fg, or set bg and space.
+                if (hb.pen.bgIs(cell.bot)) {
+                    try w.writeByte(' ');
+                } else if (hb.pen.fgIs(cell.top)) {
+                    try w.writeAll("█");
+                } else {
+                    try hb.pen.set(w, null, cell.bot);
+                    try w.writeByte(' ');
+                }
+                continue;
+            }
+            try hb.pen.set(w, cell.top, cell.bot);
+            try w.writeAll("▀");
+        }
+    }
+};
+
+// ---------------------------------------------------------------- tests
+
+const testing = std.testing;
+const golden = @import("golden.zig");
+
+fn render(hb: *HalfBlock, frame: Frame, rect: Rect) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    errdefer aw.deinit();
+    try hb.present(&aw.writer, frame, rect, null);
+    return aw.toOwnedSlice();
+}
+
+test "tiny frame: exact bytes, then an unchanged frame writes nothing" {
+    const A = [3]u8{ 1, 2, 3 };
+    const B = [3]u8{ 40, 50, 60 };
+    const C = [3]u8{ 200, 0, 9 };
+    // A 2×2 image fills a 2×1 rect of 10×20 px cells exactly (2×2 sub-pixels).
+    // Cell 0 = A over C (▀); cell 1 = B over B (one colour: bg + space).
+    const px = A ++ B ++ C ++ B;
+    var hb: HalfBlock = .init(testing.allocator, .{ .w = 10, .h = 20 });
+    defer hb.deinit();
+    const frame: Frame = .{ .width = 2, .height = 2, .rgb = &px };
+    const out = try render(&hb, frame, .{ .col = 3, .row = 5, .cols = 2, .rows = 1 });
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("\x1b[0m\x1b[5;3H\x1b[38;2;1;2;3;48;2;200;0;9m▀\x1b[48;2;40;50;60m \x1b[0m", out);
+    const again = try render(&hb, frame, .{ .col = 3, .row = 5, .cols = 2, .rows = 1 });
+    defer testing.allocator.free(again);
+    try testing.expectEqualStrings("", again);
+}
+
+test "golden: test-core frame 60, 80×24 at 10×20 px cells" {
+    const frame = try golden.loadFrame60(testing.allocator);
+    defer testing.allocator.free(frame.rgb);
+    var hb: HalfBlock = .init(testing.allocator, golden.cell_px);
+    defer hb.deinit();
+    const out = try render(&hb, frame, golden.rect);
+    defer testing.allocator.free(out);
+    try golden.check("render-halfblock-80x24.bin", out);
+}
+
+test "changed cells: a shifted bar redraws one column only" {
+    const frame = try golden.loadFrame60(testing.allocator);
+    defer testing.allocator.free(frame.rgb);
+    var hb: HalfBlock = .init(testing.allocator, golden.cell_px);
+    defer hb.deinit();
+    testing.allocator.free(try render(&hb, frame, golden.rect));
+
+    // Invert source columns 100–101 on every row. The fitted box is 55
+    // cols at col 13; target column 21 covers source x ∈ [97.7, 102.4), so
+    // only cell column 13 + 21 = 34 changes, on all 24 rows.
+    const moved = try testing.allocator.dupe(u8, frame.rgb);
+    defer testing.allocator.free(moved);
+    for (0..frame.height) |y| for (100..102) |x| for (0..3) |k| {
+        moved[(y * frame.width + x) * 3 + k] ^= 0xff;
+    };
+    const out = try render(&hb, .{ .width = frame.width, .height = frame.height, .rgb = moved }, golden.rect);
+    defer testing.allocator.free(out);
+    const g = try golden.scan(out);
+    try testing.expectEqual(@as(usize, 24), g.glyphs);
+    try testing.expectEqual(@as(usize, 24), g.cups);
+    try testing.expectEqual(@as(?u32, 34), g.only_col);
+}
+
+test "empty frame or rect writes nothing" {
+    var hb: HalfBlock = .init(testing.allocator, golden.cell_px);
+    defer hb.deinit();
+    const px = [_]u8{ 1, 2, 3 };
+    const empty = try render(&hb, .{ .width = 0, .height = 0, .rgb = &.{} }, golden.rect);
+    defer testing.allocator.free(empty);
+    try testing.expectEqualStrings("", empty);
+    const no_rect = try render(&hb, .{ .width = 1, .height = 1, .rgb = &px }, .{ .cols = 0, .rows = 5 });
+    defer testing.allocator.free(no_rect);
+    try testing.expectEqualStrings("", no_rect);
+}
+
+test "rect change and setCellPx force a full redraw" {
+    const frame = try golden.loadFrame60(testing.allocator);
+    defer testing.allocator.free(frame.rgb);
+    var hb: HalfBlock = .init(testing.allocator, golden.cell_px);
+    defer hb.deinit();
+    testing.allocator.free(try render(&hb, frame, golden.rect));
+    const moved = try render(&hb, frame, .{ .col = 2, .row = 1, .cols = 80, .rows = 24 });
+    defer testing.allocator.free(moved);
+    try testing.expectEqual(@as(usize, 55 * 24), (try golden.scan(moved)).glyphs);
+    hb.setCellPx(golden.cell_px);
+    const after = try render(&hb, frame, .{ .col = 2, .row = 1, .cols = 80, .rows = 24 });
+    defer testing.allocator.free(after);
+    try testing.expectEqual(@as(usize, 55 * 24), (try golden.scan(after)).glyphs);
+}

@@ -41,10 +41,18 @@ pub fn build(b: *std.Build) !void {
     for ([_][]const u8{ "xrgb8888", "rgb565", "0rgb1555" }) |f| {
         test_options.addOptionPath(b.fmt("golden_{s}", .{f}), b.path(b.fmt("testdata/golden/testcore-{s}-f60.ppm", .{f})));
     }
+    // Renderer goldens (testdata/golden/render-*): read and, with
+    // -Dupdate-goldens, rewritten by the tests themselves.
+    const update_goldens = b.option(bool, "update-goldens", "Rewrite renderer golden files that differ (the test still fails)") orelse false;
+    test_options.addOption(bool, "update_goldens", update_goldens);
+    test_options.addOption([]const u8, "golden_dir", try b.root.joinString(b.allocator, "testdata/golden"));
     const test_mod = makeModule(b, target, optimize);
     test_mod.addImport("test_options", test_options.createModule());
     const tests = b.addTest(.{ .root_module = test_mod });
-    b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
+    const run_tests = b.addRunArtifact(tests);
+    try addRenderGoldenInputs(b, run_tests);
+    if (update_goldens) run_tests.has_side_effects = true;
+    b.step("test", "Run unit tests").dependOn(&run_tests.step);
 
     // Cross build: zig-out/<os>-<arch>/temui[.exe]
     const cross_step = b.step("cross", "Build all six release targets");
@@ -180,4 +188,17 @@ fn makeModule(
     mod.addIncludePath(b.path("vendor/stb_sprintf"));
     mod.addCSourceFile(.{ .file = b.path("src/libretro/core_log.c"), .flags = &.{"-std=c99"} });
     return mod;
+}
+
+/// Makes the test run depend on every `testdata/golden/render-*` file, so
+/// editing or regenerating one invalidates the cached result.
+fn addRenderGoldenInputs(b: *std.Build, run: *std.Build.Step.Run) !void {
+    const io = b.graph.io;
+    var dir = try b.root.openDir(io, "testdata/golden", .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |e| {
+        if (e.kind != .file or !std.mem.startsWith(u8, e.name, "render-")) continue;
+        run.addFileInput(b.path(b.fmt("testdata/golden/{s}", .{e.name})));
+    }
 }

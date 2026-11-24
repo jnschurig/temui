@@ -4,6 +4,23 @@
 const std = @import("std");
 const CellPx = @import("../term/caps.zig").CellPx;
 
+/// One RGB24 frame (`host.Frame` has the same shape).
+pub const Frame = struct {
+    width: usize,
+    height: usize,
+    /// Packed RGB888, `width * height * 3` bytes.
+    rgb: []const u8,
+
+    pub fn isEmpty(f: Frame) bool {
+        return f.width == 0 or f.height == 0;
+    }
+
+    /// Width / height of the pixels as stored.
+    pub fn aspect(f: Frame) f32 {
+        return @as(f32, @floatFromInt(f.width)) / @as(f32, @floatFromInt(f.height));
+    }
+};
+
 /// A rectangle of character cells; `col`/`row` are 1-based like CUP.
 pub const Rect = struct {
     col: u32 = 1,
