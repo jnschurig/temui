@@ -11,6 +11,10 @@ const log = @import("log");
 const paths = @import("paths");
 const cli = @import("cli.zig");
 const term = @import("term.zig");
+const detect = @import("detect.zig");
+const reader = @import("reader.zig");
+const replies = @import("replies.zig");
+const util = @import("util.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .debug,
@@ -61,14 +65,51 @@ pub fn main(init: std.process.Init) !u8 {
     try term.enter();
     defer term.restore();
 
-    // Placeholder until the run loop exists (step 6).
-    term.writeAll("termbench skeleton: press any key\r\n");
-    var b: [16]u8 = undefined;
-    _ = std.c.read(term.stdin_fd, &b, b.len);
+    switch (opts.command) {
+        .help => unreachable,
+        .detect => return runDetect(io, arena, init.environ_map, opts, out),
+        .run => {
+            // Placeholder until the run loop exists (step 6).
+            term.writeAll("termbench: run not implemented yet; press any key\r\n");
+            var b: [16]u8 = undefined;
+            _ = std.c.read(term.stdin_fd, &b, b.len);
+            return 0;
+        },
+    }
+}
+
+fn runDetect(io: std.Io, arena: std.mem.Allocator, env: *const std.process.Environ.Map, opts: cli.Options, out: *std.Io.Writer) !u8 {
+    const r = detect.probe(arena, env) catch |err| {
+        term.restore();
+        std.log.err("detect failed: {t}", .{err});
+        try out.print("termbench: detect failed: {t}\n", .{err});
+        try out.flush();
+        return 1;
+    };
+    term.restore();
+    std.log.info("detect: {f}", .{std.json.fmt(r, .{})});
+
+    var name_buf: [32]u8 = undefined;
+    var stamp_buf: [16]u8 = undefined;
+    const path = opts.out orelse try std.fmt.allocPrint(arena, "termbench-detect-{s}-{s}.json", .{
+        r.terminalName(&name_buf), util.utcStamp(io, &stamp_buf),
+    });
+    try detect.printSummary(out, r);
+    util.writeJsonFile(io, path, r) catch |err| {
+        try out.print("\ntermbench: could not write {s}: {t}\n", .{ path, err });
+        try out.flush();
+        return 1;
+    };
+    try out.print("\nresults: {s}\n", .{path});
+    try out.flush();
     return 0;
 }
 
 test {
     _ = cli;
     _ = term;
+    _ = replies;
+    _ = reader;
+    _ = detect;
+    _ = util;
 }
