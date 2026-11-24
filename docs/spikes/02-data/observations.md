@@ -21,3 +21,12 @@ Both exceed the 160×61 minimum, so half-block cells drew the same fixed cell ar
 ## Not done
 
 - Run-to-run repeat of surprising cells (Ghostty shm 256×224 scroll at ~26k fps; Rex half-diff 256×224 scroll min 561 vs avg 655): skipped; within-cell 1-s windows are tight.
+
+## Paced runs (`--fps 60 --double-buffer`, 256×224 scroll, kitty transports, 10 s)
+
+- `rex-paced.jsonl` (Rex, 225×68) and `ghostty-paced.jsonl` (Ghostty, 245×65): every transport held 60 fps. These give the per-frame cost when every frame is painted; see the results doc.
+- Visual (user watching): Rex: shm, inline-rgb and (probably) file a little stuttery; zlib and rgba smooth. Ghostty: shm, inline-rgb and inline-zlib stuttered a tiny bit; file and rgba smooth. p99 intervals were 20–21 ms everywhere (nominal 16.7 ms); termbench's sleep-based pacing may contribute.
+
+## Incident
+
+At 20:20 local time a termbench run started in Ghostty (245×65) with the original Rex command, probably recalled from shell history, and overwrote `rex-detect.json` / `rex-run.jsonl`. It was interrupted after one cell. The files were restored from commit `fc90c6a` (the real Rex run).

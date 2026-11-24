@@ -152,21 +152,23 @@ Frame pixels travel over shared memory when the client is local. Inputs sent ove
 
 **Decision.** One renderer interface. The backend is chosen automatically by querying the terminal and can be overridden with a flag.
 
-- **Kitty graphics** (primary): sends frames at native resolution and lets the terminal scale them, reusing one image id per instance. Transport is shared memory when local, falling back to a temp file, then to inline data (zlib). Supported in kitty, Ghostty, WezTerm and Rex.
+- **Kitty graphics** (primary): sends frames at native resolution and lets the terminal scale them. Each instance alternates two image ids: it transmits and places frame N on one id, then deletes the other id's placement. Re-sending a single id flickers severely in Ghostty (a photosensitivity hazard), and alternating costs nothing measurable (02). The transport order is a per-terminal preference, keyed by XTVERSION. The default order is shared memory when local, then temp file, then inline zlib. In Rex the order is inline zlib first, because its shm and file paths cost about 2× the terminal CPU (02). Inline zlib is always the last fallback and the only remote option. Raw inline RGB/RGBA is not used. Supported in kitty, Ghostty, WezTerm and Rex.
 - **Half-block truecolor** (universal fallback): `▀` with foreground/background colors, two pixels per cell; only changed cells are redrawn.
 - **ASCII**: a brightness ramp with optional color. Resolution is the terminal's size in character cells (font size doesn't matter). Meant to be cheap when many instances are visible.
 
 Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or ASCII at first.
 
-**Rationale.** Kitty graphics gives full resolution at the lowest CPU cost wherever it's supported. Half-block works on any truecolor terminal. ASCII keeps a grid of many instances affordable.
+**Rationale.** Kitty graphics gives full resolution at the lowest CPU cost wherever it's supported. Measured in [spike 02](spikes/02-terminal-graphics.md) on an M2 Max at 256×224 and 60 fps, the total CPU per frame for temui plus the terminal was 3.7 ms for Ghostty with shm and 5.9 ms for Rex with zlib. Half-block works on any truecolor terminal. ASCII keeps a grid of many instances affordable.
 
 **Alternatives rejected.**
 - *Sixel first:* palette-limited, and encoding is CPU-heavy at 60 fps. Deferred to 17.
 - *Scaling in temui:* wastes bandwidth when the terminal can scale.
 - *Kitty Unicode placeholders:* unnecessary for full-pane rendering.
+- *One global transport order* (rejected after 02): the cheapest transport differs by terminal (Ghostty shm, Rex inline zlib).
+- *One image id per instance* (rejected after 02): flickers in Ghostty.
 
 **Risks / open questions.**
-- Throughput at 60 fps for each transport, in each terminal. Rex has an active report of kitty-graphics frame rates much lower than kitty or Ghostty, plus reports of high CPU on large animation frames. Half-block may be the better default in Rex. → 02.
+- Throughput at 60 fps: measured in 02. Ghostty 1.4.0 and Rex 0.1.0-preview.19 pass 60 fps with every transport, and unpaced every kitty transport reaches 500 fps or more. Rex's reported slow frame rates did not reproduce, so half-block is not Rex's default. kitty, WezTerm, SSH and tmux are not measured; they use the default order until measured.
 - Detection: some terminals answer the kitty query but perform poorly. Allow a per-terminal override in config.
 - tmux needs passthrough for kitty graphics (best-effort; half-block works).
 
@@ -327,7 +329,7 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 
 | Tier | Terminals | Renderer | Input |
 |---|---|---|---|
-| 1 — full | kitty, Ghostty, WezTerm, Rex | kitty graphics (half-block in Rex if 02 shows it is faster) | kitty keyboard protocol |
+| 1 — full | kitty, Ghostty, WezTerm, Rex | kitty graphics, double-buffered; shm → file → inline zlib (inline zlib first in Rex) | kitty keyboard protocol |
 | 2 — truecolor | any truecolor terminal (incl. Windows Terminal) | half-block | kitty protocol if present; otherwise timeout-guessed key releases, or the Windows console API |
 | 3 — basic | anything else | ASCII | as tier 2 |
 
@@ -348,8 +350,8 @@ tmux is best-effort: kitty graphics needs `allow-passthrough`, and half-block wo
 
 | Risk | Status | Retired by |
 |---|---|---|
-| Kitty-graphics throughput at 60 fps per transport, in kitty / Ghostty / WezTerm / Rex | open (Rex has an active slow-frame-rate report) | [02](roadmap/02-spike-terminal-graphics.md) |
-| Terminal capability detection is reliable | open | [02](roadmap/02-spike-terminal-graphics.md), [04](roadmap/04-renderers.md) |
+| Kitty-graphics throughput at 60 fps per transport, in kitty / Ghostty / WezTerm / Rex | **retired for Ghostty and Rex** (all transports pass 60 fps; [results](spikes/02-terminal-graphics.md)); kitty, WezTerm, SSH, tmux not measured | [02](roadmap/02-spike-terminal-graphics.md) |
+| Terminal capability detection is reliable | **prototyped in 02**: Ghostty and Rex answer every query in under 0.3 ms; DA1 sentinel plus a 500 ms hard timeout; not measured over SSH or in other terminals | [02](roadmap/02-spike-terminal-graphics.md), [04](roadmap/04-renderers.md) |
 | Zig std TLS loads system certificates on Linux and Windows | verified on macOS only | [07](roadmap/07-core-acquisition.md) |
 | `.sig` (`RACSIG01`) core signatures can be verified | open | [07](roadmap/07-core-acquisition.md) |
 | Windows AF_UNIX works at runtime from Zig std | supported in source; untested | [12](roadmap/12-control-protocol-and-registry.md) (fallback: named pipes) |
@@ -378,4 +380,6 @@ Each nightly directory also has `.index-extended` (date, CRC32, filename) and pe
 - `std.http.Client.fetch` downloaded `snes9x_libretro.so.zip` from the buildbot over HTTPS on macOS (200, 988,900 bytes, identical to curl).
 - `std.Io` implements AF_UNIX listen/connect on Windows through AFD, gated on a minimum target of `win10_rs4`.
 
-**Rex.** Supports kitty graphics fully since mac 0.1.0-preview.19 / server preview.5, including file and shared-memory transport (the server rewrites local reads for remote clients). Supports the kitty keyboard protocol. There are open reports of lower kitty-graphics frame rates and high CPU on large animation frames, and inline images ≥10 MB are dropped.
+**Rex.** Supports kitty graphics fully since mac 0.1.0-preview.19 / server preview.5, including file and shared-memory transport (the server rewrites local reads for remote clients). Supports the kitty keyboard protocol. There are open reports of lower kitty-graphics frame rates and high CPU on large animation frames, and inline images ≥10 MB are dropped. In spike 02, preview.19 passed 60 fps with every transport. Its shm and file paths cost about 2× the terminal CPU of inline zlib.
+
+**Ghostty (1.4.0, spike 02).** Re-sending one kitty image id every frame flickers severely on inline raw frames. Alternating two ids fixes it.
