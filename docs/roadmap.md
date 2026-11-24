@@ -18,7 +18,7 @@ Spike items (02, and the spikes inside 07, 12 and 15) exist to retire risks befo
 | 01 | [Scaffold and build matrix](roadmap/01-scaffold.md) | MVP | — | ☑ 2026-11-23 |
 | 02 | [Spike: terminal graphics throughput](roadmap/02-spike-terminal-graphics.md) | MVP | 01 | ☑ 2026-11-24 |
 | 03 | [libretro host and test core](roadmap/03-libretro-host-and-test-core.md) | MVP | 01 | ☑ 2026-11-24 |
-| 04 | [Renderers](roadmap/04-renderers.md) | MVP | 02, 03 | ☐ |
+| 04 | [Renderers](roadmap/04-renderers.md) | MVP | 02, 03 | ☑ 2026-11-24 |
 | 05 | [Play loop](roadmap/05-play-loop.md) | MVP | 03, 04 | ☐ |
 | 06 | [Keyboard input and modes](roadmap/06-keyboard-input-and-modes.md) | MVP | 05 | ☐ |
 | 07 | [Core acquisition](roadmap/07-core-acquisition.md) | MVP | 01, 03 | ☐ |

@@ -172,7 +172,7 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 - *One image id per instance* (rejected after 02): flickers in Ghostty.
 
 **Risks / open questions.**
-- Throughput at 60 fps: measured in 02. Ghostty 1.4.0 and Rex 0.1.0-preview.19 pass 60 fps with every transport, and unpaced every kitty transport reaches 500 fps or more. Rex's reported slow frame rates did not reproduce, so half-block is not Rex's default. kitty, WezTerm, SSH and tmux are not measured; they use the default order until measured.
+- Throughput at 60 fps: measured in 02. Ghostty 1.4.0 and Rex 0.1.0-preview.19 pass 60 fps with every transport, and unpaced every kitty transport reaches 500 fps or more. Rex's reported slow frame rates did not reproduce, so half-block is not Rex's default. kitty, WezTerm, SSH and tmux are not measured; they use the default order until measured. Re-measured through the production renderer in 04 ([results](bench/04-renderers.md)): Ghostty with shm and Rex with zlib hold 60 fps with a p99 frame interval of about 20.5 ms, and temui's own cost is 0.3 and 0.6 ms per frame. Half-block also holds a paced 60 fps, but costs about 10 ms per frame for temui plus the terminal when every cell changes, about 3.5× kitty graphics.
 - Detection: some terminals answer the kitty query but perform poorly. Allow a per-terminal override in config.
 - tmux needs passthrough for kitty graphics (best-effort; half-block works).
 
@@ -355,8 +355,8 @@ tmux is best-effort: kitty graphics needs `allow-passthrough`, and half-block wo
 
 | Risk | Status | Retired by |
 |---|---|---|
-| Kitty-graphics throughput at 60 fps per transport, in kitty / Ghostty / WezTerm / Rex | **retired for Ghostty and Rex** (all transports pass 60 fps; [results](spikes/02-terminal-graphics.md)); kitty, WezTerm, SSH, tmux not measured | [02](roadmap/02-spike-terminal-graphics.md) |
-| Terminal capability detection is reliable | **prototyped in 02**: Ghostty and Rex answer every query in under 0.3 ms; DA1 sentinel plus a 500 ms hard timeout; not measured over SSH or in other terminals | [02](roadmap/02-spike-terminal-graphics.md), [04](roadmap/04-renderers.md) |
+| Kitty-graphics throughput at 60 fps per transport, in kitty / Ghostty / WezTerm / Rex | **retired for Ghostty and Rex** (all transports pass 60 fps; [results](spikes/02-terminal-graphics.md)); confirmed through the production renderer in 04 ([results](bench/04-renderers.md)); kitty, WezTerm, SSH, tmux not measured | [02](roadmap/02-spike-terminal-graphics.md), [04](roadmap/04-renderers.md) |
+| Terminal capability detection is reliable | **implemented in 04**: DA1 sentinel plus a 500 ms hard timeout, kitty transports probed at startup; verified live in Ghostty 1.4.0 and Rex (`temui detect`); kitty, WezTerm, tmux and a dumb terminal covered by recorded-reply unit tests; not measured over SSH | [02](roadmap/02-spike-terminal-graphics.md), [04](roadmap/04-renderers.md) |
 | Zig std TLS loads system certificates on Linux and Windows | verified on macOS only | [07](roadmap/07-core-acquisition.md) |
 | `.sig` (`RACSIG01`) core signatures can be verified | open | [07](roadmap/07-core-acquisition.md) |
 | Windows AF_UNIX works at runtime from Zig std | supported in source; untested | [12](roadmap/12-control-protocol-and-registry.md) (fallback: named pipes) |
