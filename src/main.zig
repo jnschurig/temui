@@ -5,6 +5,12 @@ const cli = @import("cli.zig");
 const paths = @import("paths.zig");
 const log = @import("log.zig");
 
+// Exports `temui_core_log_sink` for core_log.c. The host references it from
+// item 03 step 5 on; until then this keeps the symbol in every build.
+comptime {
+    _ = @import("libretro/core_log.zig");
+}
+
 pub const std_options: std.Options = .{
     // Compile debug logging in; `log` filters by level at runtime.
     .log_level = .debug,
@@ -71,6 +77,7 @@ test {
     _ = paths;
     _ = log;
     _ = @import("log_files.zig");
+    _ = @import("libretro/core_log.zig");
 }
 
 test "vendored libretro.h translates" {

@@ -112,5 +112,9 @@ fn makeExe(
         },
     });
 
+    // Core log formatting (src/libretro/core_log.c): see vendor/stb_sprintf.
+    mod.addIncludePath(b.path("vendor/stb_sprintf"));
+    mod.addCSourceFile(.{ .file = b.path("src/libretro/core_log.c"), .flags = &.{"-std=c99"} });
+
     return b.addExecutable(.{ .name = "temui", .root_module = mod });
 }
