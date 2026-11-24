@@ -41,7 +41,7 @@ golden that is regenerated without looking will happily lock in a bug.
 
 `render-*` files are renderer output for the XRGB8888 frame above, drawn into
 an 80×24 cell rect of 10×20 px cells (`src/render/golden.zig`). Cell backends
-(half-block, ASCII) are compared byte for byte. They are binary (`.bin`, see
+(half-block, ASCII) are compared byte for byte; kitty as readable text. They are binary (`.bin`, see
 `.gitattributes`) because they hold raw escape sequences.
 
 | File | Backend |
@@ -50,6 +50,7 @@ an 80×24 cell rect of 10×20 px cells (`src/render/golden.zig`). Cell backends
 | `render-ascii-truecolor-80x24.bin` | ASCII, truecolor fg |
 | `render-ascii-256-80x24.bin` | ASCII, 256-colour fg |
 | `render-ascii-mono-80x24.bin` | ASCII, no colour |
+| `render-kitty-zlib-80x24.txt` | kitty graphics, inline zlib: control bytes only, one escape per line, base64 payloads elided as `…` and continuation chunks dropped (the test separately inflates the payload and compares it with the PPM) |
 
 ## Regenerating
 

@@ -96,6 +96,11 @@ pub fn clearMargin(w: *std.Io.Writer, rect: Rect, box: Rect) !void {
     }
 }
 
+/// Resets SGR and erases every cell of `rect`.
+pub fn clearRect(w: *std.Io.Writer, rect: Rect) !void {
+    try clearMargin(w, rect, .{ .col = rect.col, .row = rect.row });
+}
+
 fn erase(w: *std.Io.Writer, row: u32, col: u32, n: u32) !void {
     try cup(w, row, col);
     try w.print("\x1b[{d}X", .{n});

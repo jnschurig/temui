@@ -97,6 +97,12 @@ pub const Order = struct {
     buf: [3]Transport = undefined,
     len: u8 = 0,
 
+    pub fn init(ts: []const Transport) Order {
+        var o: Order = .{};
+        for (ts) |t| o.append(t);
+        return o;
+    }
+
     pub fn slice(o: *const Order) []const Transport {
         return o.buf[0..o.len];
     }
