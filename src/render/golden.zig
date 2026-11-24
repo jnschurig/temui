@@ -37,20 +37,38 @@ pub fn check(name: []const u8, got: []const u8) !void {
         else => return err,
     };
     defer if (want) |w| gpa.free(w);
-    if (want != null and std.mem.eql(u8, want.?, got)) return;
+    // Text goldens may be checked out with CRLF (git autocrlf on Windows).
+    const want_cmp: ?[]const u8 = if (want) |w| (if (std.mem.endsWith(u8, name, ".txt")) w[0..crlfToLf(w)] else w) else null;
+    if (want_cmp != null and std.mem.eql(u8, want_cmp.?, got)) return;
 
     if (test_options.update_goldens) {
         try cwd.writeFile(testing.io, .{ .sub_path = path, .data = got });
         std.debug.print("golden {s}: rewritten ({d} bytes); inspect it before committing\n", .{ name, got.len });
         return error.GoldenUpdated;
     }
-    if (want) |w| {
+    if (want_cmp) |w| {
         const at = std.mem.indexOfDiff(u8, w, got) orelse @min(w.len, got.len);
         std.debug.print("golden {s}: differs at byte {d} (want {d} bytes, got {d}); regenerate with `zig build test -Dupdate-goldens` if intended\n", .{ name, at, w.len, got.len });
         return error.GoldenMismatch;
     }
     std.debug.print("golden {s}: missing; create it with `zig build test -Dupdate-goldens`\n", .{name});
     return error.GoldenMissing;
+}
+
+/// Rewrites every CRLF in `buf` as LF, in place; returns the new length.
+fn crlfToLf(buf: []u8) usize {
+    var n: usize = 0;
+    for (buf, 0..) |b, i| {
+        if (b == '\r' and i + 1 < buf.len and buf[i + 1] == '\n') continue;
+        buf[n] = b;
+        n += 1;
+    }
+    return n;
+}
+
+test crlfToLf {
+    var buf = "a\r\nb\rc\r\n\n".*;
+    try testing.expectEqualStrings("a\nb\rc\n\n", buf[0..crlfToLf(&buf)]);
 }
 
 pub const Scan = struct {
