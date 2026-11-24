@@ -90,6 +90,8 @@ test {
     _ = @import("libretro/host.zig");
     _ = @import("ppm.zig");
     _ = run;
+    _ = @import("term/replies.zig");
+    _ = @import("term/caps.zig");
 }
 
 test "vendored libretro.h translates" {
