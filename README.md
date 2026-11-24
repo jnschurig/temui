@@ -39,7 +39,10 @@ mise install                              # install the pinned Zig
 zig build                                 # native binary: zig-out/bin/temui
 zig build test                            # unit tests
 zig build cross -Doptimize=ReleaseSafe    # all six targets: zig-out/<os>-<arch>/
+zig build bench                           # renderer benchmarks: zig-out/bin/temui-bench
 ```
+
+`temui-bench encode` times each renderer backend without a terminal; `temui-bench live` draws in the current terminal at a paced 60 fps and reports frame rate, frame-interval p99 and CPU (`temui-bench --help`).
 
 ## Running a core headless
 
@@ -51,6 +54,19 @@ temui run --headless --core snes9x_libretro.dylib --rom game.sfc --frames 600 \
 ```
 
 It prints one summary line (core name and version, frames run, final geometry, pixel format). `temui --help` lists every option. `zig build` also builds a small test core, `zig-out/lib/temui_test_libretro.{dylib,so}` (`zig-out/bin/temui_test_libretro.dll` on Windows), which runs with `--rom testdata/testcore.rom`.
+
+## Detecting the terminal
+
+`temui detect` asks the terminal what it supports (kitty graphics and which of its transports work, truecolor, cell size) and prints the renderer temui would use: kitty graphics, half-block, or ASCII. `--json` prints the same as JSON. `--renderer kitty|halfblock|ascii|auto` overrides the choice; for now it is accepted only by `detect`.
+
+```sh
+temui detect
+temui detect --json --renderer halfblock
+```
+
+The terminal is in raw mode only while the queries run (at most about a second, usually a millisecond). When stdin or stdout isn't a terminal, nothing is sent and `auto` picks ASCII without colour. Windows consoles aren't queried: temui uses half-block there.
+
+If temui is killed with `SIGKILL` (`kill -9`) while it owns the screen, it can't restore the terminal. Run `reset` to recover. Other signals (`SIGINT`, `SIGTERM`, `SIGHUP`) and crashes restore it automatically.
 
 ## Logs
 

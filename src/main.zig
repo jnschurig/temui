@@ -6,12 +6,23 @@ const paths = @import("paths.zig");
 const log = @import("log.zig");
 const run = @import("run.zig");
 const host = @import("libretro/host.zig");
+const session = @import("term/session.zig");
+const detect_cmd = @import("detect_cmd.zig");
 
 pub const std_options: std.Options = .{
     // Compile debug logging in; `log` filters by level at runtime.
     .log_level = .debug,
     .logFn = log.logFn,
 };
+
+/// Restores the terminal (if a session is active) before the default panic
+/// output, so the message lands on a usable screen.
+pub const panic = std.debug.FullPanic(panicRestoring);
+
+fn panicRestoring(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    session.restore();
+    std.debug.defaultPanic(msg, first_trace_addr);
+}
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
@@ -62,6 +73,10 @@ pub fn main(init: std.process.Init) !u8 {
         // No ROM browser yet (item 08), so bare `temui` shows usage.
         .none, .help => try cli.usage(stdout, log_dir orelse "(unavailable: home directory not set)"),
         .version => try stdout.print("temui {s}\n", .{build_options.version}),
+        .detect => {
+            const code = try detect_cmd.run(init.arena.allocator(), io, init.environ_map, opts.renderer, opts.json, stdout);
+            if (code != 0) return code;
+        },
         .run => {
             var diag: host.Diagnostic = .{};
             run.run(init.gpa, io, &opts.run, stdout, stderr, &diag) catch |err| {
@@ -90,6 +105,18 @@ test {
     _ = @import("libretro/host.zig");
     _ = @import("ppm.zig");
     _ = run;
+    _ = @import("term/replies.zig");
+    _ = @import("term/caps.zig");
+    _ = session;
+    _ = @import("term/detect.zig");
+    _ = detect_cmd;
+    _ = @import("render/layout.zig");
+    _ = @import("render/sgr.zig");
+    _ = @import("render/halfblock.zig");
+    _ = @import("render/ascii.zig");
+    _ = @import("render/kitty.zig");
+    _ = @import("render/Renderer.zig");
+    _ = @import("lib.zig");
 }
 
 test "vendored libretro.h translates" {

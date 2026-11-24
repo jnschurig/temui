@@ -2,8 +2,9 @@
 
 const std = @import("std");
 const env = @import("libretro/env.zig");
+const Backend = @import("term/caps.zig").Backend;
 
-pub const Command = enum { none, help, version, run };
+pub const Command = enum { none, help, version, run, detect };
 
 /// At most this many `--option` flags; parsing stays allocation-free.
 pub const max_core_options = 64;
@@ -12,6 +13,10 @@ pub const Options = struct {
     command: Command = .none,
     verbose: bool = false,
     log_file: ?[]const u8 = null,
+    /// `--renderer`; null is `auto`. Only valid with `detect` until item 05.
+    renderer: ?Backend = null,
+    /// `detect --json`.
+    json: bool = false,
     /// Set when `command == .run`.
     run: Run = .{},
 };
@@ -49,6 +54,10 @@ pub const Error = struct {
         unexpected_argument,
         /// `arg` is a run option given without the `run` command.
         run_only,
+        /// `arg` is a detect option given without the `detect` command.
+        detect_only,
+        /// `arg`'s `value` is not one of the allowed choices.
+        invalid_choice,
         /// `run` without `--headless`.
         headless_required,
         /// `arg` is a required run option that is missing.
@@ -66,6 +75,8 @@ pub const Error = struct {
             .missing_value => try w.print("temui: option '{s}' requires a value\n", .{e.arg}),
             .unexpected_argument => try w.print("temui: unexpected argument '{s}'\n", .{e.arg}),
             .run_only => try w.print("temui: option '{s}' is only valid with 'run'\n", .{e.arg}),
+            .detect_only => try w.print("temui: option '{s}' is only valid with 'detect' for now\n", .{e.arg}),
+            .invalid_choice => try w.print("temui: option '{s}' needs one of kitty, halfblock, ascii, auto; got '{s}'\n", .{ e.arg, e.value }),
             .headless_required => try w.writeAll("temui: run requires --headless (interactive run arrives in a later item)\n"),
             .missing_required => try w.print("temui: run requires '{s}'\n", .{e.arg}),
             .invalid_number => try w.print("temui: option '{s}' needs a positive integer, got '{s}'\n", .{ e.arg, e.value }),
@@ -82,11 +93,12 @@ pub const Result = union(enum) {
 };
 
 /// Options that take a value, as `--name value` or `--name=value`.
-const Valued = enum { log_file, core, rom, frames, dump_ppm, dump_every, option, system_dir, save_dir };
+const Valued = enum { log_file, renderer, core, rom, frames, dump_ppm, dump_every, option, system_dir, save_dir };
 
 fn valuedName(v: Valued) []const u8 {
     return switch (v) {
         .log_file => "--log-file",
+        .renderer => "--renderer",
         .core => "--core",
         .rom => "--rom",
         .frames => "--frames",
@@ -103,6 +115,9 @@ fn valuedName(v: Valued) []const u8 {
 pub fn parse(args: []const [:0]const u8) Result {
     var opts: Options = .{};
     var run_cmd = false;
+    var detect_cmd = false;
+    // The first detect-only option seen, for the error without `detect`.
+    var first_detect_option: ?[]const u8 = null;
     var headless = false;
     var frames_set = false;
     // The first run option seen, for the error when `run` is missing.
@@ -126,9 +141,14 @@ pub fn parse(args: []const [:0]const u8) Result {
             };
             const name = valuedName(m.which);
             if (value.len == 0) return .{ .err = .{ .kind = .missing_value, .arg = name } };
-            if (m.which != .log_file and first_run_option == null) first_run_option = name;
+            if (m.which != .log_file and m.which != .renderer and first_run_option == null) first_run_option = name;
             switch (m.which) {
                 .log_file => opts.log_file = value,
+                .renderer => {
+                    opts.renderer = if (eql(value, "auto")) null else std.meta.stringToEnum(Backend, value) orelse
+                        return .{ .err = .{ .kind = .invalid_choice, .arg = name, .value = value } };
+                    if (first_detect_option == null) first_detect_option = name;
+                },
                 .core => opts.run.core = value,
                 .rom => opts.run.rom = value,
                 .dump_ppm => opts.run.dump_ppm = value,
@@ -154,16 +174,28 @@ pub fn parse(args: []const [:0]const u8) Result {
                     opts.run.option_len += 1;
                 },
             }
+        } else if (eql(arg, "--json")) {
+            opts.json = true;
+            if (first_detect_option == null) first_detect_option = arg;
         } else if (arg.len > 1 and arg[0] == '-') {
             return .{ .err = .{ .kind = .unknown_option, .arg = arg } };
-        } else if (eql(arg, "run") and !run_cmd) {
+        } else if (eql(arg, "run") and !run_cmd and !detect_cmd) {
             run_cmd = true;
+        } else if (eql(arg, "detect") and !run_cmd and !detect_cmd) {
+            detect_cmd = true;
         } else {
             return .{ .err = .{ .kind = .unexpected_argument, .arg = arg } };
         }
     }
 
     if (opts.command != .none) return .{ .ok = opts };
+    if (!detect_cmd) {
+        if (first_detect_option) |name| return .{ .err = .{ .kind = .detect_only, .arg = name } };
+    } else {
+        if (first_run_option) |name| return .{ .err = .{ .kind = .run_only, .arg = name } };
+        opts.command = .detect;
+        return .{ .ok = opts };
+    }
     if (!run_cmd) {
         if (first_run_option) |name| return .{ .err = .{ .kind = .run_only, .arg = name } };
         return .{ .ok = opts };
@@ -196,12 +228,17 @@ pub fn usage(w: *std.Io.Writer, log_dir: []const u8) std.Io.Writer.Error!void {
         \\
         \\Usage: temui [options]
         \\       temui run --headless --core <path> --rom <path> --frames <N> [run options]
+        \\       temui detect [--json] [--renderer <name>]
         \\
         \\Options:
         \\  -h, --help              Show this help and exit
         \\  -V, --version           Show the version and exit
         \\  -v, --verbose           Log at debug level
         \\      --log-file <path>   Log to <path> instead of the log directory
+        \\      --renderer <name>   kitty, halfblock, ascii or auto (default); 'detect' only for now
+        \\
+        \\Detect options (show what temui would use in this terminal):
+        \\      --json              Print the result as JSON
         \\
         \\Run options:
         \\      --headless          Run without a display (required for now)
@@ -286,7 +323,7 @@ test "error message" {
 }
 
 test "usage mentions log dir" {
-    var buf: [1024]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     try usage(&w, "/logs/here");
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "Logs: /logs/here\n") != null);
@@ -404,4 +441,32 @@ test "run error messages" {
         "temui: option '--frames' needs a positive integer, got '0'\nTry 'temui --help' for more information.\n",
         w.buffered(),
     );
+}
+
+test "detect: command, --json and --renderer" {
+    try expectOk(&.{"detect"}, .{ .command = .detect });
+    const r = parse(&.{ "--renderer", "halfblock", "detect", "--json" });
+    try testing.expect(r == .ok);
+    try testing.expectEqual(Command.detect, r.ok.command);
+    try testing.expect(r.ok.json);
+    try testing.expectEqual(@as(?Backend, .halfblock), r.ok.renderer);
+    for ([_]struct { [:0]const u8, ?Backend }{ .{ "kitty", .kitty }, .{ "ascii", .ascii }, .{ "auto", null } }) |c| {
+        var buf: [32]u8 = undefined;
+        const arg = try std.fmt.bufPrintSentinel(&buf, "--renderer={s}", .{c[0]}, 0);
+        const rr = parse(&.{ "detect", arg });
+        try testing.expectEqual(c[1], rr.ok.renderer);
+    }
+    try expectOk(&.{ "detect", "--help" }, .{ .command = .help });
+}
+
+test "detect: usage errors" {
+    try expectErr(&.{ "--renderer", "kitty" }, .detect_only, "--renderer");
+    try expectErr(&.{"--json"}, .detect_only, "--json");
+    try expectErr(&.{ "run", "--headless", "--core", "c", "--rom", "g", "--frames", "1", "--renderer", "ascii" }, .detect_only, "--renderer");
+    try expectErr(&.{ "detect", "--renderer", "sixel" }, .invalid_choice, "--renderer");
+    try expectErr(&.{ "detect", "--renderer" }, .missing_value, "--renderer");
+    try expectErr(&.{ "detect", "--core", "c" }, .run_only, "--core");
+    try expectErr(&.{ "detect", "run" }, .unexpected_argument, "run");
+    try expectErr(&.{ "run", "detect" }, .unexpected_argument, "detect");
+    try expectErr(&.{ "detect", "detect" }, .unexpected_argument, "detect");
 }

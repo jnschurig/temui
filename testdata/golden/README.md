@@ -36,3 +36,31 @@ done
 **Inspect the diff before committing.** Convert old and new to PNG (e.g.
 `sips -s format png <file>.ppm --out <file>.png` on macOS) and look at them: a
 golden that is regenerated without looking will happily lock in a bug.
+
+# Renderer goldens
+
+`render-*` files are renderer output for the XRGB8888 frame above, drawn into
+an 80×24 cell rect of 10×20 px cells (`src/render/golden.zig`). Cell backends
+(half-block, ASCII) are compared byte for byte; kitty as readable text. They are binary (`.bin`, see
+`.gitattributes`) because they hold raw escape sequences.
+
+| File | Backend |
+|---|---|
+| `render-halfblock-80x24.bin` | half-block truecolor |
+| `render-ascii-truecolor-80x24.bin` | ASCII, truecolor fg |
+| `render-ascii-256-80x24.bin` | ASCII, 256-colour fg |
+| `render-ascii-mono-80x24.bin` | ASCII, no colour |
+| `render-kitty-zlib-80x24.txt` | kitty graphics, inline zlib: control bytes only, one escape per line, base64 payloads elided as `…` and continuation chunks dropped (the test separately inflates the payload and compares it with the PPM) |
+
+## Regenerating
+
+```sh
+zig build test -Dupdate-goldens
+```
+
+Every golden that is missing or differs is rewritten, and its test fails so an
+update can't pass silently. Run `zig build test` again to confirm.
+
+**Inspect before committing.** `cat` a cell golden in a truecolor terminal
+(it draws in place at the top left; `clear` afterwards), and compare it with
+the PPM.

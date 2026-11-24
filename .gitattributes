@@ -1,2 +1,4 @@
 *.ppm binary
 *.rom binary
+*.bin binary
+testdata/golden/*.txt eol=lf
