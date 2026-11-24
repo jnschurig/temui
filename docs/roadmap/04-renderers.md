@@ -13,7 +13,7 @@ Build the production renderer interface and its three backends, with automatic s
 ## In scope
 - The renderer interface: init with terminal capabilities, present a frame into a cell rectangle, resize, teardown.
 - Terminal capability detection (from item 02's prototype) and a `--renderer kitty|halfblock|ascii` override.
-- Kitty backend: one image id per instance, native-resolution frames, terminal-side scaling, shared memory → temp file → inline (zlib) fallback.
+- Kitty backend: two alternating image ids per instance (D7), native-resolution frames, terminal-side scaling, per-terminal transport order (default shared memory → temp file → inline zlib; inline zlib first in Rex).
 - Half-block backend: `▀` with fg/bg truecolor, 2 pixels per cell, redrawing only changed cells.
 - ASCII backend: brightness ramp with optional color, sized to the cell rectangle.
 - Golden-output tests (escape-sequence output for a known frame) and a benchmark step.

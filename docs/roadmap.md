@@ -16,7 +16,7 @@ Spike items (02, and the spikes inside 07, 12 and 15) exist to retire risks befo
 | # | Item | Tier | Depends on | Status |
 |---|---|---|---|---|
 | 01 | [Scaffold and build matrix](roadmap/01-scaffold.md) | MVP | — | ☑ 2026-11-23 |
-| 02 | [Spike: terminal graphics throughput](roadmap/02-spike-terminal-graphics.md) | MVP | 01 | ☐ |
+| 02 | [Spike: terminal graphics throughput](roadmap/02-spike-terminal-graphics.md) | MVP | 01 | ☑ 2026-11-24 |
 | 03 | [libretro host and test core](roadmap/03-libretro-host-and-test-core.md) | MVP | 01 | ☐ |
 | 04 | [Renderers](roadmap/04-renderers.md) | MVP | 02, 03 | ☐ |
 | 05 | [Play loop](roadmap/05-play-loop.md) | MVP | 03, 04 | ☐ |
@@ -65,7 +65,7 @@ Spike items (02, and the spikes inside 07, 12 and 15) exist to retire risks befo
 
 ### 04 · Renderers
 - **Goal:** the production renderer interface with three backends.
-- **Scope:** the renderer interface; automatic detection plus an override flag; kitty graphics (shared memory → file → inline); half-block that redraws only changed cells; ASCII. Golden-image tests and a throughput benchmark per renderer.
+- **Scope:** the renderer interface; automatic detection plus an override flag; kitty graphics, double-buffered, with a per-terminal transport order (default shared memory → file → inline zlib; inline zlib first in Rex); half-block that redraws only changed cells; ASCII. Golden-image tests and a throughput benchmark per renderer.
 - **Decisions:** D7, D14.
 - **Acceptance sketch:** each backend renders the test core correctly (golden output). Detection picks the expected backend in each tier-1 terminal. The benchmark meets the targets set by 02.
 - **Seed:** [roadmap/04-renderers.md](roadmap/04-renderers.md)
