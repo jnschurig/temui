@@ -79,6 +79,7 @@ test {
     _ = @import("log_files.zig");
     _ = @import("libretro/core_log.zig");
     _ = @import("libretro/pixels.zig");
+    _ = @import("libretro/env.zig");
     _ = @import("ppm.zig");
 }
 
