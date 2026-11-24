@@ -114,4 +114,6 @@ test {
     _ = util;
     _ = @import("scene.zig");
     _ = @import("stats.zig");
+    _ = @import("kitty.zig");
+    _ = @import("halfblock.zig");
 }
