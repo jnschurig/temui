@@ -7,10 +7,33 @@ A single-binary, dependency-free, terminal-based [libretro](https://www.libretro
 
 ## Status
 
-Pre-alpha: **no code yet.** The architecture is decided and the work is planned.
+Pre-alpha: the build, CLI skeleton, file logging and CI are in place; nothing plays games yet.
 
 - [Architecture decisions](docs/decisions.md): what was chosen and why (D1–D15).
 - [Roadmap](docs/roadmap.md): ordered work items, each with a seed prompt in [`docs/roadmap/`](docs/roadmap/).
+
+## Building
+
+The Zig version is pinned in [`mise.toml`](mise.toml); install it with [mise](https://mise.jdx.dev/).
+
+```sh
+mise install                              # install the pinned Zig
+zig build                                 # native binary: zig-out/bin/temui
+zig build test                            # unit tests
+zig build cross -Doptimize=ReleaseSafe    # all six targets: zig-out/<os>-<arch>/
+```
+
+## Logs
+
+temui never logs to stdout (it carries the terminal graphics). Each process writes its own file, `temui-<UTC start>-<pid>.log`, into:
+
+| OS | Directory |
+| --- | --- |
+| Linux | `$XDG_STATE_HOME/temui/logs` (default `~/.local/state/temui/logs`) |
+| macOS | `~/Library/Logs/temui` |
+| Windows | `%LOCALAPPDATA%\temui\logs` |
+
+Files roll over at 5 MB, and the newest 20 (up to 50 MB in total) are kept. `--verbose` logs at debug level; `--log-file <path>` appends to one file instead. `temui --help` shows the directory.
 
 ## License
 
