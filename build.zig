@@ -37,6 +37,10 @@ pub fn build(b: *std.Build) !void {
     const test_options = b.addOptions();
     test_options.addOptionPath("test_core_path", testcore.getEmittedBin());
     test_options.addOptionPath("testcore_rom", b.path("testdata/testcore.rom"));
+    // One option per file, so editing a golden invalidates the cached test run.
+    for ([_][]const u8{ "xrgb8888", "rgb565", "0rgb1555" }) |f| {
+        test_options.addOptionPath(b.fmt("golden_{s}", .{f}), b.path(b.fmt("testdata/golden/testcore-{s}-f60.ppm", .{f})));
+    }
     const test_mod = makeModule(b, target, optimize);
     test_mod.addImport("test_options", test_options.createModule());
     const tests = b.addTest(.{ .root_module = test_mod });

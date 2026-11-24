@@ -177,3 +177,32 @@ test "run reports option warnings on stderr and fails cleanly on a bad core" {
     try testing.expect(std.mem.startsWith(u8, diag.message(), "cannot load core "));
     try testing.expect(!host.isLoaded());
 }
+
+test "frame 60 matches the committed golden for each pixel format" {
+    inline for (.{ "xrgb8888", "rgb565", "0rgb1555" }) |format| {
+        const golden_path = @field(@import("test_options"), "golden_" ++ format);
+        var t: TmpPath = .init();
+        defer t.tmp.cleanup();
+        var opts = testRun(60);
+        opts.dump_ppm = t.join("out");
+        opts.dump_every = 60;
+        opts.option_buf[0] = .{ .key = "temui_test_pixel_format", .value = format };
+        opts.option_len = 1;
+
+        var out_buf: [256]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&out_buf);
+        var err_buf: [256]u8 = undefined;
+        var err: std.Io.Writer = .fixed(&err_buf);
+        var diag: host.Diagnostic = .{};
+        try run(testing.allocator, testing.io, &opts, &out, &err, &diag);
+
+        const got = try t.tmp.dir.readFileAlloc(testing.io, "out/frame-000060.ppm", testing.allocator, .limited(1 << 20));
+        defer testing.allocator.free(got);
+        const want = try std.Io.Dir.cwd().readFileAlloc(testing.io, golden_path, testing.allocator, .limited(1 << 20));
+        defer testing.allocator.free(want);
+        if (!std.mem.eql(u8, want, got)) {
+            std.debug.print("{s}: frame 60 differs from the golden; see testdata/golden/README.md\n", .{format});
+            return error.TestExpectedEqual;
+        }
+    }
+}
