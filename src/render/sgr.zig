@@ -1,5 +1,5 @@
-//! Small escape-sequence helpers shared by the cell backends: cursor moves,
-//! SGR colour with redundant-change elision, and margin clearing.
+//! Small helpers shared by the cell backends: cursor moves, SGR colour with
+//! redundant-change elision, changed-run detection, and margin clearing.
 
 const std = @import("std");
 const Rect = @import("layout.zig").Rect;
@@ -49,6 +49,36 @@ pub const Pen = struct {
     }
 };
 
+/// Changed runs separated by at most this many unchanged cells are merged:
+/// re-sending a few cells is cheaper than another cursor move.
+pub const merge_gap = 2;
+
+/// Iterates the runs `[a, b)` of a row where `new` differs from `old`
+/// (`Cell.eql`), merging runs separated by at most `merge_gap` unchanged
+/// cells.
+pub fn ChangedRuns(comptime Cell: type) type {
+    return struct {
+        new: []const Cell,
+        old: []const Cell,
+        x: u32 = 0,
+
+        pub fn next(it: *@This()) ?[2]u32 {
+            const n: u32 = @intCast(it.new.len);
+            while (it.x < n and it.new[it.x].eql(it.old[it.x])) it.x += 1;
+            if (it.x >= n) return null;
+            const a = it.x;
+            var last = a;
+            var j = a + 1;
+            // `j - last - 1` unchanged cells lie between `last` and `j`.
+            while (j < n and j - last - 1 <= merge_gap) : (j += 1) {
+                if (!it.new[j].eql(it.old[j])) last = j;
+            }
+            it.x = last + 1;
+            return .{ a, last + 1 };
+        }
+    };
+}
+
 /// Resets SGR, then erases (ECH, default background) every cell of `rect`
 /// outside `box`. `box` must lie inside `rect`.
 pub fn clearMargin(w: *std.Io.Writer, rect: Rect, box: Rect) !void {
@@ -90,6 +120,26 @@ test "clearMargin erases around the box" {
         "\x1b[1;1H\x1b[10X" ++
         "\x1b[2;1H\x1b[2X\x1b[2;8H\x1b[3X" ++
         "\x1b[3;1H\x1b[10X", w.buffered());
+}
+
+test "ChangedRuns merges small gaps" {
+    const C = struct {
+        v: u8,
+        pub fn eql(a: @This(), b: @This()) bool {
+            return a.v == b.v;
+        }
+    };
+    const old: [12]C = @splat(.{ .v = 0 });
+    var new = old;
+    for ([_]usize{ 1, 4, 8, 10 }) |i| new[i].v = 1;
+    var it: ChangedRuns(C) = .{ .new = &new, .old = &old };
+    // 1 and 4 have 2 unchanged cells between them (merged); 8 has 3 after
+    // 4 (new run), and 10 has 1 after 8 (merged).
+    try std.testing.expectEqual([2]u32{ 1, 5 }, it.next().?);
+    try std.testing.expectEqual([2]u32{ 8, 11 }, it.next().?);
+    try std.testing.expectEqual(@as(?[2]u32, null), it.next());
+    var none: ChangedRuns(C) = .{ .new = &old, .old = &old };
+    try std.testing.expectEqual(@as(?[2]u32, null), none.next());
 }
 
 test "clearMargin with no margin only resets" {

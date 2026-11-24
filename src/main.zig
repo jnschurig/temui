@@ -95,6 +95,7 @@ test {
     _ = @import("render/layout.zig");
     _ = @import("render/sgr.zig");
     _ = @import("render/halfblock.zig");
+    _ = @import("render/ascii.zig");
 }
 
 test "vendored libretro.h translates" {

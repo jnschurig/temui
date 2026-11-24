@@ -13,15 +13,11 @@ const Rect = layout.Rect;
 const Frame = layout.Frame;
 const Rgb = sgr.Rgb;
 
-/// Changed runs separated by at most this many unchanged cells are merged:
-/// re-sending a few cells is cheaper than another cursor move.
-const merge_gap = 2;
-
 const Cell = struct {
     top: Rgb,
     bot: Rgb,
 
-    fn eql(a: Cell, b: Cell) bool {
+    pub fn eql(a: Cell, b: Cell) bool {
         return std.mem.eql(u8, &a.top, &b.top) and std.mem.eql(u8, &a.bot, &b.bot);
     }
 };
@@ -92,21 +88,10 @@ pub const HalfBlock = struct {
                 try hb.emitRun(w, box, y, row, 0, box.cols);
                 continue;
             }
-            const old = hb.prev[yi * box.cols ..][0..box.cols];
-            var x: u32 = 0;
-            while (x < box.cols) {
-                if (row[x].eql(old[x])) {
-                    x += 1;
-                    continue;
-                }
-                var last = x;
-                var j = x + 1;
-                while (j < box.cols and j - last <= merge_gap) : (j += 1) {
-                    if (!row[j].eql(old[j])) last = j;
-                }
-                try hb.emitRun(w, box, y, row, x, last + 1);
+            var runs: sgr.ChangedRuns(Cell) = .{ .new = row, .old = hb.prev[yi * box.cols ..][0..box.cols] };
+            while (runs.next()) |r| {
+                try hb.emitRun(w, box, y, row, r[0], r[1]);
                 wrote = true;
-                x = last + 1;
             }
         }
         if (wrote) try w.writeAll(sgr.reset);

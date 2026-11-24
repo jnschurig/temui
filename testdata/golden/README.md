@@ -47,6 +47,9 @@ an 80×24 cell rect of 10×20 px cells (`src/render/golden.zig`). Cell backends
 | File | Backend |
 |---|---|
 | `render-halfblock-80x24.bin` | half-block truecolor |
+| `render-ascii-truecolor-80x24.bin` | ASCII, truecolor fg |
+| `render-ascii-256-80x24.bin` | ASCII, 256-colour fg |
+| `render-ascii-mono-80x24.bin` | ASCII, no colour |
 
 ## Regenerating
 
