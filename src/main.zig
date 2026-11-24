@@ -92,6 +92,7 @@ test {
     _ = run;
     _ = @import("term/replies.zig");
     _ = @import("term/caps.zig");
+    _ = @import("render/layout.zig");
 }
 
 test "vendored libretro.h translates" {
