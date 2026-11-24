@@ -112,7 +112,11 @@ pub const Ascii = struct {
         const box = layout.fit(rect, a.cell_px, aspect orelse frame.aspect());
         if (box.isEmpty()) return;
 
-        const full = if (a.last) |l| !std.meta.eql(l.rect, rect) or !std.meta.eql(l.box, box) else true;
+        const last = a.last;
+        // Set again only on success: after any error the next present
+        // redraws everything.
+        a.last = null;
+        const full = if (last) |l| !std.meta.eql(l.rect, rect) or !std.meta.eql(l.box, box) else true;
         if (full) try a.resize(box);
 
         try a.resampler.sample(frame.rgb, @intCast(frame.width), @intCast(frame.height), a.pixels, box.cols, box.rows);
@@ -120,7 +124,11 @@ pub const Ascii = struct {
 
         a.pen = null;
         var wrote = full;
-        if (full) try sgr.clearMargin(w, rect, box);
+        if (full) {
+            // The previous rect's cells outside the new one, then the margin.
+            if (last) |l| if (!std.meta.eql(l.rect, rect)) try sgr.clearMargin(w, l.rect, rect);
+            try sgr.clearMargin(w, rect, box);
+        }
         for (0..box.rows) |yi| {
             const y: u32 = @intCast(yi);
             const row = a.cur[yi * box.cols ..][0..box.cols];
@@ -151,7 +159,7 @@ pub const Ascii = struct {
 
     fn resize(a: *Ascii, box: Rect) !void {
         const n = @as(usize, box.cols) * box.rows;
-        if (a.cur.len != n) {
+        if (a.cur.len != n or a.prev.len != n) {
             a.gpa.free(a.cur);
             a.cur = &.{};
             a.gpa.free(a.prev);
@@ -310,4 +318,34 @@ test "rect change and setCellPx force a full redraw" {
     const after = try render(&a, frame, .{ .col = 2, .row = 1, .cols = 80, .rows = 24 });
     defer testing.allocator.free(after);
     try testing.expectEqual(@as(usize, 55 * 24), (try golden.scan(after)).glyphs);
+}
+
+test "a moved rect erases the old rect's uncovered cells" {
+    const frame = try golden.loadFrame60(testing.allocator);
+    defer testing.allocator.free(frame.rgb);
+    var a: Ascii = .init(testing.allocator, golden.cell_px, .none);
+    defer a.deinit();
+    testing.allocator.free(try render(&a, frame, golden.rect));
+    const moved = try render(&a, frame, .{ .col = 2, .row = 1, .cols = 80, .rows = 24 });
+    defer testing.allocator.free(moved);
+    try testing.expect(std.mem.startsWith(u8, moved, "\x1b[0m\x1b[1;1H\x1b[1X\x1b[2;1H\x1b[1X"));
+}
+
+test "a present that runs out of memory leaves a state the next one recovers from" {
+    const frame = try golden.loadFrame60(testing.allocator);
+    defer testing.allocator.free(frame.rgb);
+    const small: Rect = .{ .col = 1, .row = 1, .cols = 20, .rows = 6 };
+    for (0..12) |k| {
+        var fa: std.testing.FailingAllocator = .init(testing.allocator, .{});
+        var a: Ascii = .init(fa.allocator(), golden.cell_px, .truecolor);
+        defer a.deinit();
+        testing.allocator.free(try render(&a, frame, small));
+        fa.fail_index = fa.alloc_index + k;
+        if (render(&a, frame, golden.rect)) |out| testing.allocator.free(out) else |err| try testing.expectEqual(error.OutOfMemory, err);
+        fa.fail_index = std.math.maxInt(usize);
+        testing.allocator.free(try render(&a, frame, small));
+        const again = try render(&a, frame, small);
+        defer testing.allocator.free(again);
+        try testing.expectEqualStrings("", again);
+    }
 }

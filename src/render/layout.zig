@@ -147,6 +147,11 @@ pub const Resampler = struct {
         r.xs = null;
         r.ys = null;
         r.tmp = &.{};
+        // Sizes match nothing, so a failed rebuild is retried in full.
+        r.src_w = 0;
+        r.src_h = 0;
+        r.dst_w = 0;
+        r.dst_h = 0;
     }
 
     /// Resamples `rgb` (`src_w × src_h`, packed RGB24) into `out`

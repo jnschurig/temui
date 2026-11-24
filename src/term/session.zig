@@ -57,8 +57,9 @@ pub const EnterError = error{ NotATerminal, AlreadyActive, WriteFailed };
 /// Puts the terminal into raw mode: no echo, no line buffering, no signals
 /// from keys (ISIG off, so Ctrl-C arrives as byte 0x03), and with
 /// `alt_screen`, the alternate screen with a hidden cursor. Installs
-/// SIGINT/SIGTERM/SIGHUP handlers (Windows: a console control handler) that
-/// restore and then terminate as the signal would have. Undo with `restore`.
+/// handlers for termination signals and crashes (`caught`; Windows: a
+/// console control handler) that restore and then hand the signal to its
+/// previous action. Undo with `restore`.
 pub fn enter(opts: Options) EnterError!void {
     if (active.load(.acquire)) return error.AlreadyActive;
     if (is_windows) try enterWindows() else try enterPosix();
@@ -136,7 +137,11 @@ fn enterPosix() EnterError!void {
     if (c.tcsetattr(0, .FLUSH, &t) != 0) return error.NotATerminal;
 }
 
-const caught = if (is_windows) [_]void{} else [_]posix.SIG{ .INT, .TERM, .HUP };
+/// Termination requests, and crashes (a fault in a libretro core, `abort`).
+const caught = if (is_windows) [_]void{} else [_]posix.SIG{ .INT, .TERM, .HUP, .QUIT, .ABRT, .SEGV, .BUS, .ILL, .FPE };
+/// The action each `caught` signal had before (default, or Zig's segfault
+/// handler that prints a stack trace).
+var previous: [caught.len]posix.Sigaction = undefined;
 
 fn installHandlers() void {
     if (handlers_installed) return;
@@ -145,19 +150,26 @@ fn installHandlers() void {
         _ = SetConsoleCtrlHandler(onCtrl, .TRUE);
         return;
     }
-    // RESETHAND: the default action is back by the time we re-raise.
     const act: posix.Sigaction = .{
         .handler = .{ .handler = onSignal },
         .mask = posix.sigemptyset(),
-        .flags = c.SA.RESETHAND,
+        .flags = 0,
     };
-    for (caught) |sig| posix.sigaction(sig, &act, null);
+    for (caught, &previous) |sig, *prev| {
+        posix.sigaction(sig, null, prev);
+        // An ignored signal (SIGHUP under nohup) stays ignored.
+        if (prev.handler.handler != posix.SIG.IGN) posix.sigaction(sig, &act, null);
+    }
 }
 
 fn onSignal(sig: posix.SIG) callconv(.c) void {
     restore();
-    // Blocked until the handler returns, then delivered with the default
-    // action, so the exit status says which signal it was.
+    // Hand the signal on to the previous action: blocked until this handler
+    // returns, then delivered, so a crash still prints its trace (on the
+    // restored screen) and the exit status says which signal it was.
+    for (caught, previous) |s, prev| {
+        if (s == sig) posix.sigaction(sig, &prev, null);
+    }
     _ = c.raise(sig);
 }
 
@@ -295,6 +307,37 @@ test "raw-only session writes nothing on restore" {
     restore();
     var buf: [16]u8 = undefined;
     try testing.expectEqualStrings("", try readAll(fds[0], &buf));
+}
+
+test "a signal restores, then takes its previous action; crashes are caught" {
+    if (is_windows) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.pipe(&fds));
+    defer _ = c.close(fds[0]);
+    const pid = c.fork();
+    try testing.expect(pid >= 0);
+    if (pid == 0) {
+        _ = c.close(fds[0]);
+        out_fd = fds[1];
+        saved = null;
+        cleanup = leave_alt;
+        active.store(true, .release);
+        handlers_installed = false;
+        installHandlers();
+        var q: posix.Sigaction = undefined;
+        posix.sigaction(.SEGV, null, &q);
+        if (q.handler.handler != onSignal) c._exit(2);
+        _ = c.raise(.TERM);
+        c._exit(3);
+    }
+    _ = c.close(fds[1]);
+    var status: c_int = 0;
+    try testing.expectEqual(pid, c.waitpid(pid, &status, 0));
+    const st: u32 = @bitCast(status);
+    try testing.expect(posix.W.IFSIGNALED(st));
+    try testing.expectEqual(posix.SIG.TERM, posix.W.TERMSIG(st));
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(leave_alt, try readAll(fds[0], &buf));
 }
 
 test "restore without a session does nothing" {

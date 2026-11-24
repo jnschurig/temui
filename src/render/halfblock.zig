@@ -64,7 +64,11 @@ pub const HalfBlock = struct {
         const box = layout.fit(rect, hb.cell_px, aspect orelse frame.aspect());
         if (box.isEmpty()) return;
 
-        const full = if (hb.last) |l| !std.meta.eql(l.rect, rect) or !std.meta.eql(l.box, box) else true;
+        const last = hb.last;
+        // Set again only on success: after any error the next present
+        // redraws everything.
+        hb.last = null;
+        const full = if (last) |l| !std.meta.eql(l.rect, rect) or !std.meta.eql(l.box, box) else true;
         const n = @as(usize, box.cols) * box.rows;
         if (full) try hb.resize(n, box);
 
@@ -80,7 +84,11 @@ pub const HalfBlock = struct {
 
         hb.pen = .{};
         var wrote = full;
-        if (full) try sgr.clearMargin(w, rect, box);
+        if (full) {
+            // The previous rect's cells outside the new one, then the margin.
+            if (last) |l| if (!std.meta.eql(l.rect, rect)) try sgr.clearMargin(w, l.rect, rect);
+            try sgr.clearMargin(w, rect, box);
+        }
         for (0..box.rows) |yi| {
             const y: u32 = @intCast(yi);
             const row = hb.cur[yi * box.cols ..][0..box.cols];
@@ -100,7 +108,7 @@ pub const HalfBlock = struct {
     }
 
     fn resize(hb: *HalfBlock, n: usize, box: Rect) !void {
-        if (hb.cur.len != n) {
+        if (hb.cur.len != n or hb.prev.len != n) {
             hb.gpa.free(hb.cur);
             hb.cur = &.{};
             hb.gpa.free(hb.prev);
@@ -211,6 +219,44 @@ test "empty frame or rect writes nothing" {
     const no_rect = try render(&hb, .{ .width = 1, .height = 1, .rgb = &px }, .{ .cols = 0, .rows = 5 });
     defer testing.allocator.free(no_rect);
     try testing.expectEqualStrings("", no_rect);
+}
+
+test "moving or shrinking the rect erases the old rect's uncovered cells" {
+    const px: [12]u8 = @splat(9);
+    var hb: HalfBlock = .init(testing.allocator, .{ .w = 10, .h = 20 });
+    defer hb.deinit();
+    const frame: Frame = .{ .width = 2, .height = 2, .rgb = &px };
+    testing.allocator.free(try render(&hb, frame, .{ .col = 3, .row = 5, .cols = 2, .rows = 1 }));
+    // One column right: old column 3 is erased.
+    const moved = try render(&hb, frame, .{ .col = 4, .row = 5, .cols = 2, .rows = 1 });
+    defer testing.allocator.free(moved);
+    try testing.expect(std.mem.startsWith(u8, moved, "\x1b[0m\x1b[5;3H\x1b[1X"));
+    // One row shorter (room for a status line): old row 24 is erased.
+    const g = try golden.loadFrame60(testing.allocator);
+    defer testing.allocator.free(g.rgb);
+    testing.allocator.free(try render(&hb, g, golden.rect));
+    const short = try render(&hb, g, .{ .col = 1, .row = 1, .cols = 80, .rows = 23 });
+    defer testing.allocator.free(short);
+    try testing.expect(std.mem.startsWith(u8, short, "\x1b[0m\x1b[24;1H\x1b[80X"));
+}
+
+test "a present that runs out of memory leaves a state the next one recovers from" {
+    const frame = try golden.loadFrame60(testing.allocator);
+    defer testing.allocator.free(frame.rgb);
+    const small: Rect = .{ .col = 1, .row = 1, .cols = 20, .rows = 6 };
+    for (0..12) |k| {
+        var fa: std.testing.FailingAllocator = .init(testing.allocator, .{});
+        var hb: HalfBlock = .init(fa.allocator(), golden.cell_px);
+        defer hb.deinit();
+        testing.allocator.free(try render(&hb, frame, small));
+        fa.fail_index = fa.alloc_index + k;
+        if (render(&hb, frame, golden.rect)) |out| testing.allocator.free(out) else |err| try testing.expectEqual(error.OutOfMemory, err);
+        fa.fail_index = std.math.maxInt(usize);
+        testing.allocator.free(try render(&hb, frame, small));
+        const again = try render(&hb, frame, small);
+        defer testing.allocator.free(again);
+        try testing.expectEqualStrings("", again);
+    }
 }
 
 test "rect change and setCellPx force a full redraw" {

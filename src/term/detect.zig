@@ -7,7 +7,11 @@
 //! that don't. If the kitty query answered OK, round 2 sends one 1×1 `a=q`
 //! test transmission per transport (shm, temp file, inline zlib; distinct
 //! ids) then DA1, and records which answered OK. Probe objects the terminal
-//! didn't consume are unlinked afterwards, also on timeout.
+//! didn't consume are unlinked afterwards, also on timeout. Replies are
+//! recorded in whichever round they arrive. If a round timed out and the
+//! terminal has answered anything, detection then waits up to one more
+//! timeout for the outstanding DA1, so late replies don't reach the shell
+//! once raw mode ends.
 //!
 //! The read loop works on plain fds and doesn't touch terminal modes, so
 //! tests drive it over pipes; `run` adds the tty check, raw mode and restore.
@@ -114,14 +118,18 @@ pub fn query(arena: std.mem.Allocator, io: Io, cs: *Capabilities, in_fd: c.fd_t,
     if (comptime is_windows) @compileError("detection queries are POSIX-only");
     var r: Reader = .{ .io = io, .fd = in_fd };
     r.drain();
+    const h: Handler = .{ .arena = arena, .cs = cs };
 
     const t0 = now(io);
     try writeAll(out_fd, round1_queries);
-    const done1 = try r.round(out_fd, opts.timeout_ms, Round1{ .arena = arena, .cs = cs });
+    const done1 = try r.round(out_fd, opts.timeout_ms, h);
     log.debug("detect: round 1 {s} after {d} ms", .{ if (done1) "answered" else "timed out", msSince(io, t0) });
-    if (!cs.kitty_graphics) return;
+    if (cs.kitty_graphics) try probeTransports(arena, io, &r, out_fd, opts, h);
+    try r.settle(opts.timeout_ms, h);
+}
 
-    // Round 2: one test transmission per transport.
+/// Round 2: one test transmission per transport.
+fn probeTransports(arena: std.mem.Allocator, io: Io, r: *Reader, out_fd: c.fd_t, opts: Options, h: Handler) !void {
     var probes: Probes = try .init(arena, opts);
     defer probes.unlink();
     var cmds: Io.Writer.Allocating = .init(arena);
@@ -130,29 +138,26 @@ pub fn query(arena: std.mem.Allocator, io: Io, cs: *Capabilities, in_fd: c.fd_t,
     };
     const t1 = now(io);
     try writeAll(out_fd, cmds.written());
-    const done2 = try r.round(out_fd, opts.timeout_ms, Round2{ .cs = cs });
+    const done2 = try r.round(out_fd, opts.timeout_ms, h);
     log.debug("detect: round 2 {s} after {d} ms", .{ if (done2) "answered" else "timed out", msSince(io, t1) });
 }
 
-const Round1 = struct {
+/// Folds replies into the capabilities in every round, so a round-1 reply
+/// that arrives late (during round 2 or the settle) still counts. Probe
+/// replies mark their transport.
+const Handler = struct {
     arena: std.mem.Allocator,
     cs: *Capabilities,
 
-    fn event(h: Round1, e: replies.Event) !void {
+    fn event(h: Handler, e: replies.Event) !void {
+        if (e.kind == .kitty_graphics) if (kittyId(e.body)) |id| {
+            for (probe_order, probe_ids) |t, pid| {
+                if (id != pid) continue;
+                if (e.kittyOk()) h.cs.transports_ok.insert(t) else log.info("detect: kitty {t} probe failed: {s}", .{ t, e.body });
+                return;
+            }
+        };
         try h.cs.record(h.arena, e);
-    }
-};
-
-const Round2 = struct {
-    cs: *Capabilities,
-
-    fn event(h: Round2, e: replies.Event) !void {
-        if (e.kind != .kitty_graphics) return;
-        const id = kittyId(e.body) orelse return;
-        for (probe_order, probe_ids) |t, pid| {
-            if (id != pid) continue;
-            if (e.kittyOk()) h.cs.transports_ok.insert(t) else log.info("detect: kitty {t} probe failed: {s}", .{ t, e.body });
-        }
     }
 };
 
@@ -176,6 +181,8 @@ const Reader = struct {
     /// DA1s sent and not yet answered. After a round times out its DA1 may
     /// still arrive; it belongs to that round, not the next.
     pending_da1: u32 = 0,
+    /// The terminal has answered something (any reply, not typed keys).
+    heard: bool = false,
 
     /// Discards input that arrived before detection (typed-ahead keys).
     fn drain(r: *Reader) void {
@@ -191,19 +198,39 @@ const Reader = struct {
 
     /// Sends DA1 and handles events until its reply (true) or the timeout
     /// or end of input (false).
-    fn round(r: *Reader, out_fd: c.fd_t, timeout_ms: u32, handler: anytype) !bool {
+    fn round(r: *Reader, out_fd: c.fd_t, timeout_ms: u32, handler: Handler) !bool {
         try writeAll(out_fd, da1);
         r.pending_da1 += 1;
+        return r.awaitDa1(timeout_ms, handler);
+    }
+
+    /// After a timed-out round, the replies still on their way would arrive
+    /// once raw mode is off and land in the shell. If the terminal has
+    /// answered anything at all, wait up to `timeout_ms` more for every
+    /// outstanding DA1, recording what comes before it. A terminal that
+    /// never answered costs nothing extra.
+    fn settle(r: *Reader, timeout_ms: u32, handler: Handler) !void {
+        if (r.pending_da1 == 0 or !r.heard) return;
+        if (!try r.awaitDa1(timeout_ms, handler)) log.info("detect: {d} DA1 replies still outstanding", .{r.pending_da1});
+    }
+
+    /// Handles events until every DA1 sent is answered (true) or the
+    /// timeout or end of input (false).
+    fn awaitDa1(r: *Reader, timeout_ms: u32, handler: Handler) !bool {
         const deadline = now(r.io) + @as(i96, timeout_ms) * std.time.ns_per_ms;
         while (try r.next(deadline)) |e| switch (e.kind) {
             .da1 => {
+                r.heard = true;
                 try handler.event(e);
                 r.pending_da1 -= 1;
                 if (r.pending_da1 == 0) return true;
             },
             .ctrl_c => return error.Interrupted,
             .byte, .other => log.debug("detect: dropped input {any}", .{e.raw}),
-            else => try handler.event(e),
+            else => {
+                r.heard = true;
+                try handler.event(e);
+            },
         };
         return false;
     }
@@ -524,6 +551,39 @@ const posix_tests = struct {
         try testing.expectEqual(@as(usize, 0), cs.transports_ok.count());
         var name: [64]u8 = undefined;
         try testing.expect(!dir.exists(try std.fmt.bufPrint(&name, "tty-graphics-protocol-temui-dt-{d}.rgba", .{c.getpid()})));
+    }
+
+    test "slow terminal: late round-1 replies are recorded and its last DA1 drained" {
+        var a = std.heap.ArenaAllocator.init(testing.allocator);
+        defer a.deinit();
+        var dir: TestDir = try .init();
+        defer dir.deinit();
+        const p: Pipes = try .init();
+        defer p.deinit();
+        var cs: Capabilities = .{ .is_tty = true };
+        // Timeout 300 ms. Kitty OK at once; round 1 times out at 300, round 2
+        // runs to 600. XTVERSION and round 1's DA1 come at 450 (in round 2),
+        // round 2's DA1 at 650 (in the settle, which runs to 900).
+        const Feeder = struct {
+            fn run(pp: Pipes) void {
+                var fds = [_]c.pollfd{.{ .fd = pp.out[0], .events = c.POLL.IN, .revents = 0 }};
+                _ = c.poll(&fds, 1, 2000);
+                writeAll(pp.in[1], "\x1b_Gi=31;OK\x1b\\") catch {};
+                var none: [0]c.pollfd = .{};
+                _ = c.poll(&none, 0, 450);
+                writeAll(pp.in[1], "\x1bP>|slow 1\x1b\\\x1b[?62c") catch {};
+                _ = c.poll(&none, 0, 200);
+                writeAll(pp.in[1], "\x1b[?62c") catch {};
+            }
+        };
+        const t = try std.Thread.spawn(.{}, Feeder.run, .{p});
+        try query(a.allocator(), testing.io, &cs, p.in[0], p.out[1], testOpts(dir.path, 300));
+        t.join();
+        try testing.expect(cs.kitty_graphics and cs.da1);
+        try testing.expectEqualStrings("slow 1", cs.xtversion.?);
+        // Nothing left over for the shell.
+        var fds = [_]c.pollfd{.{ .fd = p.in[0], .events = c.POLL.IN, .revents = 0 }};
+        try testing.expectEqual(@as(c_int, 0), c.poll(&fds, 1, 0));
     }
 
     test "Ctrl-C aborts detection" {

@@ -80,19 +80,22 @@ pub fn ChangedRuns(comptime Cell: type) type {
 }
 
 /// Resets SGR, then erases (ECH, default background) every cell of `rect`
-/// outside `box`. `box` must lie inside `rect`.
+/// outside `box`. `box` may lie partly or wholly outside `rect`.
 pub fn clearMargin(w: *std.Io.Writer, rect: Rect, box: Rect) !void {
     try w.writeAll(reset);
     const box_end_col = box.col + box.cols;
     const rect_end_col = rect.col + rect.cols;
     for (rect.row..rect.row + rect.rows) |r_usize| {
         const r: u32 = @intCast(r_usize);
-        if (r < box.row or r >= box.row + box.rows) {
+        if (r < box.row or r >= box.row + box.rows or box.cols == 0) {
             try erase(w, r, rect.col, rect.cols);
             continue;
         }
-        if (box.col > rect.col) try erase(w, r, rect.col, box.col - rect.col);
-        if (rect_end_col > box_end_col) try erase(w, r, box_end_col, rect_end_col - box_end_col);
+        if (box.col > rect.col) try erase(w, r, rect.col, @min(box.col, rect_end_col) - rect.col);
+        if (rect_end_col > box_end_col) {
+            const from = @max(box_end_col, rect.col);
+            try erase(w, r, from, rect_end_col - from);
+        }
     }
 }
 
