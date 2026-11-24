@@ -12,15 +12,17 @@ handle: *anyopaque,
 pub const OpenError = error{ OpenFailed, OutOfMemory };
 
 /// Opens the library at `path`. On failure, writes a one-line reason (without
-/// the path) to `reason`. A path without a directory separator is treated as
-/// relative to the working directory, never searched for on the library path.
-pub fn open(gpa: std.mem.Allocator, path: []const u8, reason: *std.Io.Writer) OpenError!DynLib {
-    const sep_chars = if (builtin.os.tag == .windows) "/\\" else "/";
-    const prefix = if (std.mem.indexOfAny(u8, path, sep_chars) == null)
-        (if (builtin.os.tag == .windows) ".\\" else "./")
-    else
-        "";
-    const full = try std.mem.concat(gpa, u8, &.{ prefix, path });
+/// the path) to `reason`. The path is made absolute first, so the platform
+/// loader never searches its library path for it (dyld would, even for a
+/// relative path with a slash).
+pub fn open(gpa: std.mem.Allocator, io: std.Io, path: []const u8, reason: *std.Io.Writer) OpenError!DynLib {
+    const full = std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            reason.print("{t}", .{err}) catch {};
+            return error.OpenFailed;
+        },
+    };
     defer gpa.free(full);
 
     if (builtin.os.tag == .windows) {
@@ -32,16 +34,15 @@ pub fn open(gpa: std.mem.Allocator, path: []const u8, reason: *std.Io.Writer) Op
             error.OutOfMemory => return error.OutOfMemory,
         };
         defer gpa.free(wide);
-        const h = win.LoadLibraryExW(wide.ptr, null, 0) orelse {
+        // The core's own DLL dependencies are searched for next to it.
+        const h = win.LoadLibraryExW(wide.ptr, null, LOAD_WITH_ALTERED_SEARCH_PATH) orelse {
             reason.print("LoadLibrary failed: {t}", .{std.os.windows.GetLastError()}) catch {};
             return error.OpenFailed;
         };
         return .{ .handle = h };
     } else {
-        const z = try gpa.dupeSentinel(u8, full, 0);
-        defer gpa.free(z);
         // RTLD_LOCAL (the default): a core's symbols never leak into the next.
-        const h = std.c.dlopen(z.ptr, .{ .NOW = true }) orelse {
+        const h = std.c.dlopen(full.ptr, .{ .NOW = true }) orelse {
             const msg: []const u8 = if (std.c.dlerror()) |e| std.mem.span(e) else "dlopen failed";
             // Keep the error on one line.
             for (msg) |ch| reason.writeByte(if (ch == '\n') ' ' else ch) catch {};
@@ -67,6 +68,8 @@ pub fn close(self: *DynLib) void {
     }
     self.* = undefined;
 }
+
+const LOAD_WITH_ALTERED_SEARCH_PATH = 0x8;
 
 const win = struct {
     extern "kernel32" fn LoadLibraryExW(name: [*:0]const u16, file: ?*anyopaque, flags: u32) callconv(.winapi) ?*anyopaque;

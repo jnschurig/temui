@@ -32,7 +32,7 @@ pub const Diagnostic = struct {
         return d.buf[0..d.len];
     }
 
-    fn set(d: *Diagnostic, comptime fmt: []const u8, args: anytype) void {
+    pub fn set(d: *Diagnostic, comptime fmt: []const u8, args: anytype) void {
         var w: std.Io.Writer = .fixed(&d.buf);
         w.print(fmt, args) catch {};
         d.len = w.end;
@@ -171,7 +171,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, config: Config, diag: *Diagnosti
 
     var reason_buf: [768]u8 = undefined;
     var reason: std.Io.Writer = .fixed(&reason_buf);
-    var lib = DynLib.open(gpa, config.core_path, &reason) catch |err| switch (err) {
+    var lib = DynLib.open(gpa, io, config.core_path, &reason) catch |err| switch (err) {
         error.OpenFailed => {
             diag.set("cannot load core {s}: {s}", .{ config.core_path, reason.buffered() });
             return error.CoreOpenFailed;
