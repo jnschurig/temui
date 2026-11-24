@@ -16,11 +16,20 @@ const reader = @import("reader.zig");
 const replies = @import("replies.zig");
 const util = @import("util.zig");
 const procstat = @import("procstat.zig");
+const run = @import("run.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .debug,
     .logFn = log.logFn,
 };
+
+/// Restore the terminal (raw mode, alt screen) before printing the panic.
+pub const panic = std.debug.FullPanic(struct {
+    fn f(msg: []const u8, ra: ?usize) noreturn {
+        term.restore();
+        std.debug.defaultPanic(msg, ra);
+    }
+}.f);
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
@@ -71,13 +80,7 @@ pub fn main(init: std.process.Init) !u8 {
     switch (opts.command) {
         .help, .procs => unreachable,
         .detect => return runDetect(io, arena, init.environ_map, opts, out),
-        .run => {
-            // Placeholder until the run loop exists (step 6).
-            term.writeAll("termbench: run not implemented yet; press any key\r\n");
-            var b: [16]u8 = undefined;
-            _ = std.c.read(term.stdin_fd, &b, b.len);
-            return 0;
-        },
+        .run => return run.main(io, init.gpa, arena, init.environ_map, opts, out),
     }
 }
 
@@ -129,6 +132,7 @@ test {
     _ = detect;
     _ = util;
     _ = procstat;
+    _ = run;
     _ = @import("scene.zig");
     _ = @import("stats.zig");
     _ = @import("kitty.zig");

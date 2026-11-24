@@ -13,6 +13,13 @@ var in_alt_screen = std.atomic.Value(bool).init(false);
 /// Set by SIGINT/SIGTERM (and by the reader on a Ctrl-C byte).
 pub var interrupted = std.atomic.Value(bool).init(false);
 var signal_count = std.atomic.Value(u32).init(0);
+var main_thread: ?c.pthread_t = null;
+
+/// Monotonic ns when the main thread's current `writeWatched` last made
+/// progress; 0 when it isn't writing. Read by the reader's watchdog.
+pub var write_since = std.atomic.Value(u64).init(0);
+/// Set by the watchdog when a write made no progress for too long.
+pub var write_stalled = std.atomic.Value(bool).init(false);
 
 pub const Size = struct {
     cols: u16,
@@ -59,6 +66,10 @@ pub fn enter() !void {
     };
     posix.sigaction(.INT, &act, null);
     posix.sigaction(.TERM, &act, null);
+    // SIGUSR1 only interrupts a blocked write (see `wakeMain`).
+    const wake: posix.Sigaction = .{ .handler = .{ .handler = onWake }, .mask = posix.sigemptyset(), .flags = 0 };
+    posix.sigaction(.USR1, &wake, null);
+    main_thread = c.pthread_self();
 
     writeAll("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H");
     in_alt_screen.store(true, .release);
@@ -71,6 +82,14 @@ pub fn restore() void {
         writeAll("\x1b_Ga=d,d=A,q=2\x1b\\\x1b[0m\x1b[2J\x1b[?25h\x1b[?1049l");
     }
     if (saved) |*t| _ = c.tcsetattr(stdin_fd, .FLUSH, t);
+}
+
+fn onWake(_: posix.SIG) callconv(.c) void {}
+
+/// Interrupts a blocking write on the main thread (EINTR or a short write),
+/// so it can notice `interrupted` or `write_stalled`.
+pub fn wakeMain() void {
+    if (main_thread) |t| _ = c.pthread_kill(t, .USR1);
 }
 
 fn onSignal(_: posix.SIG) callconv(.c) void {
@@ -103,6 +122,31 @@ pub fn tryWriteAll(bytes: []const u8) bool {
         rest = rest[@intCast(n)..];
     }
     return true;
+}
+
+pub const WriteResult = enum { ok, stalled, interrupted, failed };
+
+/// Blocking write of all of `bytes` that gives up when the run is
+/// interrupted or the reader's watchdog flags a stall (no progress for the
+/// ack timeout). Stdout stays blocking: O_NONBLOCK on the tty would also
+/// affect the shell's stdin and outlive a crash.
+pub fn writeWatched(bytes: []const u8) WriteResult {
+    write_stalled.store(false, .release);
+    write_since.store(nowNs(), .release);
+    defer write_since.store(0, .release);
+    var rest = bytes;
+    while (rest.len > 0) {
+        const n = c.write(stdout_fd, rest.ptr, rest.len);
+        if (n < 0 and c._errno().* != @backingInt(c.E.INTR)) return .failed;
+        if (n > 0) {
+            rest = rest[@intCast(n)..];
+            write_since.store(nowNs(), .release);
+        }
+        if (rest.len == 0) break;
+        if (interrupted.load(.acquire)) return .interrupted;
+        if (write_stalled.load(.acquire)) return .stalled;
+    }
+    return .ok;
 }
 
 /// Monotonic nanoseconds.

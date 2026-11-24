@@ -14,6 +14,11 @@ pub const Reader = struct {
     ack_ns: []u64,
     /// Total DSR acks seen. Written only by the reader thread.
     acks: std.atomic.Value(u64) = .init(0),
+    /// Total DA1 replies seen (resync sentinel between cells).
+    da1s: std.atomic.Value(u64) = .init(0),
+    /// Watchdog: a main-thread write with no progress for this long is
+    /// interrupted and flagged as stalled. 0 = off.
+    stall_ns: u64 = 0,
     kitty_errors: std.atomic.Value(u32) = .init(0),
     /// First bytes of the most recent kitty error reply (for logs/results).
     last_kitty_error: [96]u8 = undefined,
@@ -54,12 +59,21 @@ pub const Reader = struct {
     /// Blocks until `acks >= target`, the deadline (monotonic ns) passes, or
     /// the run is interrupted. Returns the ack count.
     pub fn waitAcks(r: *Reader, target: u64, deadline_ns: u64) u64 {
-        var n = r.acks.load(.acquire);
+        return r.waitFor(&r.acks, target, deadline_ns);
+    }
+
+    /// Like `waitAcks`, for DA1 replies.
+    pub fn waitDa1(r: *Reader, target: u64, deadline_ns: u64) u64 {
+        return r.waitFor(&r.da1s, target, deadline_ns);
+    }
+
+    fn waitFor(r: *Reader, counter: *const std.atomic.Value(u64), target: u64, deadline_ns: u64) u64 {
+        var n = counter.load(.acquire);
         if (n >= target) return n;
         _ = c.pthread_mutex_lock(&r.mutex);
         defer _ = c.pthread_mutex_unlock(&r.mutex);
         while (true) {
-            n = r.acks.load(.acquire);
+            n = counter.load(.acquire);
             if (n >= target or term.interrupted.load(.acquire)) return n;
             const now = term.nowNs();
             if (now >= deadline_ns) return n;
@@ -70,12 +84,17 @@ pub const Reader = struct {
         }
     }
 
+    fn watchdog(r: *const Reader) void {
+        watchdogCheck(r.stall_ns);
+    }
+
     fn run(r: *Reader) void {
         var parser: replies.Parser = .{};
         var buf: [4096]u8 = undefined;
         var fds = [_]c.pollfd{.{ .fd = term.stdin_fd, .events = c.POLL.IN, .revents = 0 }};
         while (!r.stop.load(.acquire)) {
             const ready = c.poll(&fds, 1, 100);
+            r.watchdog();
             if (ready <= 0) continue;
             const n = c.read(term.stdin_fd, &buf, buf.len);
             if (n <= 0) {
@@ -84,6 +103,7 @@ pub const Reader = struct {
             }
             const now = term.nowNs();
             var new_acks: u64 = 0;
+            var new_da1s: u64 = 0;
             const base = r.acks.load(.monotonic);
             for (buf[0..@intCast(n)]) |b| {
                 const e = parser.feed(b) orelse continue;
@@ -98,12 +118,21 @@ pub const Reader = struct {
                         r.last_kitty_error_len.store(len, .release);
                         _ = r.kitty_errors.fetchAdd(1, .acq_rel);
                     },
-                    .ctrl_c => term.interrupted.store(true, .release),
+                    .da1 => new_da1s += 1,
+                    .ctrl_c => {
+                        // A second Ctrl-C means the main thread is stuck.
+                        if (term.interrupted.swap(true, .acq_rel)) {
+                            term.restore();
+                            c._exit(130);
+                        }
+                        term.wakeMain();
+                    },
                     else => {},
                 }
             }
-            if (new_acks > 0) {
-                r.acks.store(base + new_acks, .release);
+            if (new_da1s > 0) _ = r.da1s.fetchAdd(new_da1s, .acq_rel);
+            if (new_acks > 0 or new_da1s > 0) {
+                if (new_acks > 0) r.acks.store(base + new_acks, .release);
                 _ = c.pthread_mutex_lock(&r.mutex);
                 _ = c.pthread_cond_signal(&r.cond);
                 _ = c.pthread_mutex_unlock(&r.mutex);
@@ -111,6 +140,15 @@ pub const Reader = struct {
         }
     }
 };
+
+// Reader-thread half of `term.writeWatched`.
+fn watchdogCheck(stall_ns: u64) void {
+    if (stall_ns == 0) return;
+    const since = term.write_since.load(.acquire);
+    if (since == 0 or term.nowNs() -| since < stall_ns) return;
+    if (term.write_stalled.swap(true, .acq_rel)) return;
+    term.wakeMain();
+}
 
 fn realtimeIn(ns: u64) c.timespec {
     var ts: c.timespec = undefined;
