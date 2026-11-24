@@ -75,7 +75,7 @@ pub const Options = struct {
     /// Handles `SET_VARIABLES`: replaces the declared set with the
     /// `{ NULL, NULL }`-terminated array. Malformed entries are skipped with a
     /// warning. Older strings stay valid, since the core may still hold them.
-    pub fn setVariables(self: *Options, list: [*c]const c.struct_retro_variable) !void {
+    pub fn setVariables(self: *Options, list: [*c]const c.struct_retro_variable) error{OutOfMemory}!void {
         const a = self.arena.allocator();
         self.declared.clearRetainingCapacity();
         if (list == null) return;
@@ -92,7 +92,7 @@ pub const Options = struct {
                     try self.warn("core option \"{s}\" has a malformed declaration \"{s}\"; ignored", .{ key, raw });
                     continue;
                 },
-                error.OutOfMemory => return err,
+                error.OutOfMemory => return error.OutOfMemory,
             };
             try self.declared.append(a, .{ .key = try a.dupe(u8, key), .values = values });
         }
@@ -117,7 +117,7 @@ pub const Options = struct {
 
     /// Checks the overrides against the declarations. Call after load: the
     /// core declares its options during `retro_set_environment`/`retro_init`.
-    pub fn validate(self: *Options) !void {
+    pub fn validate(self: *Options) error{OutOfMemory}!void {
         for (self.overrides) |o| {
             const d = self.find(o.key) orelse {
                 try self.warn("option \"{s}\" is not declared by the core; ignored", .{o.key});
@@ -138,7 +138,7 @@ pub const Options = struct {
         return null;
     }
 
-    fn warn(self: *Options, comptime fmt: []const u8, args: anytype) !void {
+    fn warn(self: *Options, comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
         const a = self.arena.allocator();
         try self.warnings.append(a, try std.fmt.allocPrint(a, fmt, args));
     }

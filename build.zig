@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) !void {
     // binary. They're imported as `test_options`, only from test blocks.
     const test_options = b.addOptions();
     test_options.addOptionPath("test_core_path", testcore.getEmittedBin());
+    test_options.addOptionPath("testcore_rom", b.path("testdata/testcore.rom"));
     const test_mod = makeModule(b, target, optimize);
     test_mod.addImport("test_options", test_options.createModule());
     const tests = b.addTest(.{ .root_module = test_mod });
