@@ -112,4 +112,6 @@ test {
     _ = reader;
     _ = detect;
     _ = util;
+    _ = @import("scene.zig");
+    _ = @import("stats.zig");
 }
