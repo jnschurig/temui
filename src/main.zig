@@ -103,6 +103,7 @@ test {
     _ = @import("term/replies.zig");
     _ = @import("term/caps.zig");
     _ = session;
+    _ = @import("term/detect.zig");
     _ = @import("render/layout.zig");
     _ = @import("render/sgr.zig");
     _ = @import("render/halfblock.zig");

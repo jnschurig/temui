@@ -294,7 +294,7 @@ pub const Kitty = struct {
     }
 };
 
-fn defaultTmpDir() []const u8 {
+pub fn defaultTmpDir() []const u8 {
     if (posix) if (c.getenv("TMPDIR")) |p| {
         const s = std.mem.span(p);
         if (s.len > 0) return s;
@@ -322,7 +322,7 @@ fn writeChunked(w: *Io.Writer, raw: []const u8) !void {
     }
 }
 
-fn writeFile(path: [:0]const u8, bytes: []const u8) !void {
+pub fn writeFile(path: [:0]const u8, bytes: []const u8) !void {
     // EXCL: never follow or reuse something already at this name.
     const fd = c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, @as(c.mode_t, 0o600));
     if (fd < 0) return error.TempFileOpen;
@@ -339,7 +339,7 @@ fn writeFile(path: [:0]const u8, bytes: []const u8) !void {
     }
 }
 
-fn writeShm(name: [:0]const u8, bytes: []const u8) !void {
+pub fn writeShm(name: [:0]const u8, bytes: []const u8) !void {
     const flags: c_int = @bitCast(c.O{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true });
     const fd = c.shm_open(name, flags, @as(c.mode_t, 0o600));
     if (fd < 0) return error.ShmOpen;
