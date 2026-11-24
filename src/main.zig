@@ -7,6 +7,7 @@ const log = @import("log.zig");
 const run = @import("run.zig");
 const host = @import("libretro/host.zig");
 const session = @import("term/session.zig");
+const detect_cmd = @import("detect_cmd.zig");
 
 pub const std_options: std.Options = .{
     // Compile debug logging in; `log` filters by level at runtime.
@@ -72,6 +73,10 @@ pub fn main(init: std.process.Init) !u8 {
         // No ROM browser yet (item 08), so bare `temui` shows usage.
         .none, .help => try cli.usage(stdout, log_dir orelse "(unavailable: home directory not set)"),
         .version => try stdout.print("temui {s}\n", .{build_options.version}),
+        .detect => {
+            const code = try detect_cmd.run(init.arena.allocator(), io, init.environ_map, opts.renderer, opts.json, stdout);
+            if (code != 0) return code;
+        },
         .run => {
             var diag: host.Diagnostic = .{};
             run.run(init.gpa, io, &opts.run, stdout, stderr, &diag) catch |err| {
@@ -104,6 +109,7 @@ test {
     _ = @import("term/caps.zig");
     _ = session;
     _ = @import("term/detect.zig");
+    _ = detect_cmd;
     _ = @import("render/layout.zig");
     _ = @import("render/sgr.zig");
     _ = @import("render/halfblock.zig");

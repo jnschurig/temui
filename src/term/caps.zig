@@ -107,7 +107,12 @@ pub const Order = struct {
         return o.buf[0..o.len];
     }
 
-    fn append(o: *Order, t: Transport) void {
+    /// Serialises as a JSON array of transport names.
+    pub fn jsonStringify(o: Order, jw: anytype) !void {
+        try jw.write(o.buf[0..o.len]);
+    }
+
+    pub fn append(o: *Order, t: Transport) void {
         o.buf[o.len] = t;
         o.len += 1;
     }
