@@ -18,8 +18,11 @@ var main_thread: ?c.pthread_t = null;
 /// Monotonic ns when the main thread's current `writeWatched` last made
 /// progress; 0 when it isn't writing. Read by the reader's watchdog.
 pub var write_since = std.atomic.Value(u64).init(0);
-/// Set by the watchdog when a write made no progress for too long.
-pub var write_stalled = std.atomic.Value(bool).init(false);
+/// Sequence number of the current (or last) `writeWatched` call.
+pub var write_seq = std.atomic.Value(u64).init(0);
+/// Set by the watchdog to the `write_seq` of a write that made no progress
+/// for too long. Per write, so a late flag can't fail the next write.
+pub var stalled_seq = std.atomic.Value(u64).init(0);
 
 pub const Size = struct {
     cols: u16,
@@ -87,7 +90,7 @@ pub fn restore() void {
 fn onWake(_: posix.SIG) callconv(.c) void {}
 
 /// Interrupts a blocking write on the main thread (EINTR or a short write),
-/// so it can notice `interrupted` or `write_stalled`.
+/// so it can notice `interrupted` or `stalled_seq`.
 pub fn wakeMain() void {
     if (main_thread) |t| _ = c.pthread_kill(t, .USR1);
 }
@@ -131,7 +134,7 @@ pub const WriteResult = enum { ok, stalled, interrupted, failed };
 /// ack timeout). Stdout stays blocking: O_NONBLOCK on the tty would also
 /// affect the shell's stdin and outlive a crash.
 pub fn writeWatched(bytes: []const u8) WriteResult {
-    write_stalled.store(false, .release);
+    const seq = write_seq.fetchAdd(1, .acq_rel) + 1;
     write_since.store(nowNs(), .release);
     defer write_since.store(0, .release);
     var rest = bytes;
@@ -144,7 +147,7 @@ pub fn writeWatched(bytes: []const u8) WriteResult {
         }
         if (rest.len == 0) break;
         if (interrupted.load(.acquire)) return .interrupted;
-        if (write_stalled.load(.acquire)) return .stalled;
+        if (stalled_seq.load(.acquire) == seq) return .stalled;
     }
     return .ok;
 }

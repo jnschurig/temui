@@ -131,13 +131,13 @@ pub fn parse(args: []const [:0]const u8) Result {
         const bad: Result = .{ .err = .{ .msg = "invalid value", .arg = v } };
         if (eql(name, "--duration")) {
             o.duration_s = std.fmt.parseFloat(f64, v) catch return bad;
-            if (!(o.duration_s > 0)) return bad;
+            if (!(o.duration_s > 0 and o.duration_s <= 1e6)) return bad;
         } else if (eql(name, "--fps")) {
             o.fps = std.fmt.parseFloat(f64, v) catch return bad;
-            if (!(o.fps >= 0)) return bad;
+            if (!(o.fps == 0 or (o.fps >= 1e-3 and o.fps <= 1e6))) return bad;
         } else if (eql(name, "--ack-timeout")) {
             o.ack_timeout_s = std.fmt.parseFloat(f64, v) catch return bad;
-            if (!(o.ack_timeout_s > 0)) return bad;
+            if (!(o.ack_timeout_s > 0 and o.ack_timeout_s <= 1e6)) return bad;
         } else if (eql(name, "--max-inflight")) {
             o.max_inflight = std.fmt.parseInt(u32, v, 10) catch return bad;
             if (o.max_inflight == 0) return bad;

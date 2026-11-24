@@ -52,7 +52,8 @@ fn addTermbench(b: *std.Build, target: std.Build.ResolvedTarget) void {
         test_step.dependOn(&fail.step);
         return;
     }
-    // Measurements need optimized encoders; `-Doptimize` still overrides.
+    // Measurements need optimized encoders, so termbench has its own
+    // optimize option; `-Doptimize` (temui's) does not apply to it.
     const optimize = b.option(std.builtin.OptimizeMode, "termbench-optimize", "Optimize mode for termbench (default fast)") orelse .fast;
     const options = b.addOptions();
     options.addOption([]const u8, "optimize", @tagName(optimize));

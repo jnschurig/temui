@@ -1,7 +1,9 @@
 //! kitty graphics protocol encoders, one per transport. Each call to
 //! `Encoder.encode` returns the complete bytes for one frame: cursor
-//! positioning plus an `a=T` transmit-and-display command that reuses one
-//! image id and one placement id (D7), scaled by the terminal to a cell box.
+//! positioning plus an `a=T` transmit-and-display command, scaled by the
+//! terminal to a cell box. By default every frame reuses image id 1; with
+//! `double_buffer` it alternates ids 1 and 2 and deletes the previous
+//! placement, which D7 requires (a single id flickers in Ghostty).
 
 const std = @import("std");
 const c = std.c;

@@ -144,9 +144,13 @@ pub const Reader = struct {
 // Reader-thread half of `term.writeWatched`.
 fn watchdogCheck(stall_ns: u64) void {
     if (stall_ns == 0) return;
+    // Read the sequence first: `writeWatched` bumps it before setting
+    // `write_since`, so a stale `since` can only pair with an older sequence,
+    // which the current write ignores.
+    const seq = term.write_seq.load(.acquire);
     const since = term.write_since.load(.acquire);
     if (since == 0 or term.nowNs() -| since < stall_ns) return;
-    if (term.write_stalled.swap(true, .acq_rel)) return;
+    if (term.stalled_seq.swap(seq, .acq_rel) == seq) return;
     term.wakeMain();
 }
 

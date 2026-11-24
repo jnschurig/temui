@@ -98,19 +98,19 @@ const Runner = struct {
         const row = r.size.rows / 2;
         const col = 1 + (r.size.cols -| @as(u16, @intCast(text.len))) / 2;
         var buf: [640]u8 = undefined;
-        term.writeAll(std.fmt.bufPrint(&buf, "{s}\x1b[0m\x1b[2J\x1b[{d};{d}H\x1b[1m{s}\x1b[0m\x1b[{d};{d}HCtrl-C to stop", .{
+        _ = term.writeWatched(std.fmt.bufPrint(&buf, "{s}\x1b[0m\x1b[2J\x1b[{d};{d}H\x1b[1m{s}\x1b[0m\x1b[{d};{d}HCtrl-C to stop", .{
             delete_images, row, col, text, row + 2, 1 + (r.size.cols -| 14) / 2,
         }) catch "");
         const end = term.nowNs() + std.time.ns_per_s;
         while (term.nowNs() < end and !term.interrupted.load(.acquire)) term.sleepNs(50 * ms);
-        term.writeAll("\x1b[2J");
+        _ = term.writeWatched("\x1b[2J");
     }
 
     /// Waits for every reply to earlier requests: replies come in order, so
     /// once a fresh DA1 is answered nothing stale can arrive later.
     fn resync(r: *Runner) !void {
         const want = r.reader.da1s.load(.acquire) + 1;
-        term.writeAll("\x1b[c");
+        _ = term.writeWatched("\x1b[c");
         if (r.reader.waitDa1(want, term.nowNs() + drain_ns) < want) {
             if (term.interrupted.load(.acquire)) return error.Interrupted;
             return error.TerminalNotResponding;
@@ -139,7 +139,7 @@ const Runner = struct {
         const width: usize = r.size.cols;
         const shown = text[0..@min(text.len, width)];
         const line = std.fmt.bufPrint(&r.line, "\x1b[{d};1H\x1b[0;7m{s}{s}\x1b[0m", .{ r.size.rows, shown, spaces[0..@min(width - shown.len, spaces.len)] }) catch return 0;
-        term.writeAll(line);
+        _ = term.writeWatched(line);
         return line.len;
     }
 
@@ -196,6 +196,9 @@ const Runner = struct {
         var last_acks = base;
         var last_progress = start;
         var next_tick = start;
+        // Paced: when the next frame is due. Missed slots are dropped, not
+        // caught up in a burst, so stutter shows up in min fps.
+        var due = start;
         var status: Status = .ok;
         var reason: ?[]const u8 = null;
 
@@ -239,12 +242,21 @@ const Runner = struct {
                 continue;
             }
             if (period_ns > 0) {
-                const due = start + sent * period_ns;
                 if (now < due) {
                     term.sleepNs(@min(due - now, next_tick -| now + 1));
                     continue;
                 }
             }
+
+            // The ack ring holds ring_len timestamps; stop before it wraps.
+            if (sent >= reader_mod.ring_len) {
+                std.log.warn("cell {d}: {d} frames, ack ring full; cell cut short", .{ index, sent });
+                break;
+            }
+            // Nothing outstanding: the ack timeout starts with this frame,
+            // not at the last ack (a pacing sleep may be longer than it).
+            if (base + sent == acks) last_progress = now;
+            if (period_ns > 0) due = @max(due, now) + period_ns;
 
             const frame = loop.frame(sent);
             const out = if (kenc) |*e| try e.encode(frame, w, h, placement) else try henc.?.encode(frame, w, h, mode);
@@ -276,7 +288,7 @@ const Runner = struct {
         // they're unlinked, and so the next cell starts clean.
         const drained = status != .interrupted and reader.waitAcks(base + sent, term.nowNs() + drain_ns) >= base + sent;
         if (kenc) |*e| e.release(e.frames);
-        term.writeAll(delete_images ++ "\x1b[0m\x1b[2J");
+        _ = term.writeWatched(delete_images ++ "\x1b[0m\x1b[2J");
 
         const acked: usize = @intCast(@min(reader.acks.load(.acquire) - base, sent));
         const ack_times = try gpa.alloc(u64, acked);

@@ -89,11 +89,15 @@ pub fn probe(arena: std.mem.Allocator, env: *const std.process.Environ.Map) !Res
 
     drain();
     var parser: replies.Parser = .{};
+    // DA1 sentinels sent but not yet answered. After a query times out its
+    // DA1 may still arrive; it belongs to that query, not the next one.
+    var pending_da1: u32 = 0;
     for (queries, r.queries) |q, *out| {
         out.* = .{ .name = q.name, .sent = try escape(arena, q.bytes), .answered = false, .reply = "", .latency_ms = null, .sentinel = false, .sentinel_ms = null };
         const t0 = term.nowNs();
         term.writeAll(q.bytes);
         term.writeAll("\x1b[c");
+        pending_da1 += 1;
         var reply: std.ArrayList(u8) = .empty;
         const deadline = t0 + hard_timeout_ms * std.time.ns_per_ms;
         outer: while (true) {
@@ -109,6 +113,8 @@ pub fn probe(arena: std.mem.Allocator, env: *const std.process.Environ.Map) !Res
             for (buf[0..@intCast(n)]) |b| {
                 const e = parser.feed(b) orelse continue;
                 if (e.kind == .da1) {
+                    pending_da1 -|= 1;
+                    if (pending_da1 > 0) continue; // a timed-out query's sentinel
                     out.sentinel = true;
                     out.sentinel_ms = at;
                     r.max_latency_ms = @max(r.max_latency_ms, at);

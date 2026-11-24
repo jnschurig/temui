@@ -35,6 +35,7 @@ Roadmap item [02](../roadmap/02-spike-terminal-graphics.md). Decision affected: 
 - To fill that gap, the **paced** runs (`--fps 60 --double-buffer`, kitty transports, 256×224 scroll) measure the real cost when every frame is painted. **Use the paced numbers for CPU budgets.**
 - GPU time is not measured.
 - termbench's own CPU per frame is 4–6× higher paced than unpaced (zlib 2.1 against 0.6 ms; shm 0.3 against 0.05 ms). The likely cause is that the CPU clocks down between frames. A real renderer pays the paced cost.
+- The paced runs scheduled frames on a fixed clock (`start + n × period`). After a hiccup, termbench sent the late frames back to back to catch up, so a short stall can still give 60 acks in its 1-s window. Paced min fps of 60 is therefore optimistic, and the p99 interval is the better stutter signal. termbench now drops missed slots instead (fixed after these runs).
 - Each matrix cell ran once. Within each cell, the slowest 1-s window was within about 10% of the average, so cells were not repeated.
 
 **Reproduce** (macOS only):
