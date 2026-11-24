@@ -114,6 +114,19 @@ test "truncates long messages with an ellipsis" {
     try testing.expectEqual(std.log.Level.err, Capture.level);
 }
 
+test "truncation does not split a UTF-8 sequence" {
+    const prev = withCapture();
+    defer sink = prev;
+    // 1019 ASCII bytes, then 3-byte characters: one straddles byte 1020.
+    var msg: [1500:0]u8 = @splat('x');
+    var i: usize = 1019;
+    while (i + 3 <= msg.len) : (i += 3) @memcpy(msg[i..][0..3], "\u{3042}");
+    logp(3, "%s", @as([*:0]const u8, &msg));
+    const t = Capture.text();
+    try testing.expect(std.unicode.utf8ValidateSlice(t));
+    try testing.expect(std.mem.endsWith(u8, t, "x\u{2026}"));
+}
+
 test "null format" {
     const prev = withCapture();
     defer sink = prev;

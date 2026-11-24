@@ -41,8 +41,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, path: []const u8, reason: *std.I
         };
         return .{ .handle = h };
     } else {
-        // RTLD_LOCAL (the default): a core's symbols never leak into the next.
-        const h = std.c.dlopen(full.ptr, .{ .NOW = true }) orelse {
+        // RTLD_LOCAL: a core's symbols never leak into the next. It is the
+        // default on glibc (whose RTLD has no LOCAL field) but not on macOS.
+        var flags: std.c.RTLD = .{ .NOW = true };
+        if (@hasField(std.c.RTLD, "LOCAL")) flags.LOCAL = true;
+        const h = std.c.dlopen(full.ptr, flags) orelse {
             const msg: []const u8 = if (std.c.dlerror()) |e| std.mem.span(e) else "dlopen failed";
             // Keep the error on one line.
             for (msg) |ch| reason.writeByte(if (ch == '\n') ' ' else ch) catch {};

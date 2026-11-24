@@ -34,10 +34,14 @@ void temui_core_log(int level, const char *fmt, ...)
       n = 0;
    if ((size_t)n >= sizeof buf) {
       /* Truncated: end the visible text with an ellipsis. */
-      len = sizeof buf - 1;
-      buf[len - 3] = ellipsis[0];
-      buf[len - 2] = ellipsis[1];
-      buf[len - 1] = ellipsis[2];
+      len = sizeof buf - 1 - 3;
+      /* Don't split a UTF-8 sequence: back up past continuation bytes and
+         drop the lead byte they belong to. */
+      while (len > 0 && ((unsigned char)buf[len] & 0xC0) == 0x80)
+         len--;
+      buf[len++] = ellipsis[0];
+      buf[len++] = ellipsis[1];
+      buf[len++] = ellipsis[2];
    } else {
       len = (size_t)n;
       /* Cores end most messages with a newline; the file log adds its own. */

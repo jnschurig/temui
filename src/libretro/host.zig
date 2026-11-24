@@ -226,6 +226,12 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, config: Config, diag: *Diagnosti
         return error.LoadGameFailed;
     }
     errdefer sym.retro_unload_game();
+    // An allocation failed in a callback during load (e.g. a partial option
+    // set): fail the load rather than run with incomplete state.
+    if (s.oom) {
+        s.oom = false;
+        return error.OutOfMemory;
+    }
 
     sym.retro_get_system_av_info(&s.av);
     try s.options.validate();
@@ -400,7 +406,7 @@ fn handleEnvironment(s: *State, cmd: c_uint, data: ?*anyopaque) error{OutOfMemor
     switch (cmd) {
         c.RETRO_ENVIRONMENT_SET_PIXEL_FORMAT => {
             const p: *const c.enum_retro_pixel_format = @ptrCast(@alignCast(data orelse return false));
-            const f = pixels.Format.fromRetro(@intCast(p.*)) orelse {
+            const f = pixels.Format.fromRetro(p.*) orelse {
                 log.warn("core asked for unsupported pixel format {d}", .{p.*});
                 return false;
             };

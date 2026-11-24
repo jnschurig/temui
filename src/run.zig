@@ -66,6 +66,11 @@ pub fn run(
 fn dumpFrame(io: std.Io, dir: std.Io.Dir, dir_path: []const u8, i: u64, diag: *host.Diagnostic) error{DumpFailed}!void {
     var name_buf: [32]u8 = undefined;
     const name = std.fmt.bufPrint(&name_buf, "frame-{d:0>6}.ppm", .{i}) catch unreachable;
+    if (host.frame().width == 0) {
+        // The core has not sent a frame yet; a 0x0 PPM helps nobody.
+        log.warn("frame {d}: no video from the core yet; not writing {s}", .{ i, name });
+        return;
+    }
     writePpm(io, dir, name) catch |err| {
         diag.set("cannot write {s}/{s}: {t}", .{ dir_path, name, err });
         return error.DumpFailed;

@@ -305,7 +305,7 @@ const bar_colors = [8]Rgb{
 fn pixelAt(x: u32, y: u32, buttons: u16) Rgb {
     if (y < bars_end) {
         // The moving bar: column (frame - 1) mod 256, inverted.
-        const bar = bar_colors[((x / 32) + game.seed) % 8];
+        const bar = bar_colors[((x / 32) + game.seed % 8) % 8];
         if (x == (game.frame -% 1) % width) return .{ .r = 255 - bar.r, .g = 255 - bar.g, .b = 255 - bar.b };
         return bar;
     }

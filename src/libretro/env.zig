@@ -118,7 +118,11 @@ pub const Options = struct {
     /// Checks the overrides against the declarations. Call after load: the
     /// core declares its options during `retro_set_environment`/`retro_init`.
     pub fn validate(self: *Options) error{OutOfMemory}!void {
-        for (self.overrides) |o| {
+        outer: for (self.overrides, 0..) |o, i| {
+            // Only the last override for a key is used (see `get`).
+            for (self.overrides[i + 1 ..]) |later| {
+                if (std.mem.eql(u8, later.key, o.key)) continue :outer;
+            }
             const d = self.find(o.key) orelse {
                 try self.warn("option \"{s}\" is not declared by the core; ignored", .{o.key});
                 continue;
@@ -254,6 +258,7 @@ test "malformed declarations are ignored with a warning" {
 
 test "overrides: valid, invalid value, undeclared key, last wins" {
     var o: Options = try .init(testing.allocator, &.{
+        .{ .key = "a_fmt", .value = "cmyk" }, // overridden below: no warning
         .{ .key = "a_fmt", .value = "rgb565" },
         .{ .key = "a_speed", .value = "warp" },
         .{ .key = "a_ghost", .value = "1" },

@@ -135,8 +135,12 @@ pub fn parse(args: []const [:0]const u8) Result {
                 .system_dir => opts.run.system_dir = value,
                 .save_dir => opts.run.save_dir = value,
                 .frames, .dump_every => {
-                    const n = std.fmt.parseInt(u64, value, 10) catch 0;
-                    if (n == 0 or value[0] == '+') return .{ .err = .{ .kind = .invalid_number, .arg = name, .value = value } };
+                    // parseInt also accepts '+' and '_' separators; allow digits only.
+                    const digits = for (value) |ch| {
+                        if (!std.ascii.isDigit(ch)) break false;
+                    } else true;
+                    const n = if (digits) std.fmt.parseInt(u64, value, 10) catch 0 else 0;
+                    if (n == 0) return .{ .err = .{ .kind = .invalid_number, .arg = name, .value = value } };
                     if (m.which == .frames) {
                         opts.run.frames = n;
                         frames_set = true;
@@ -351,7 +355,7 @@ test "run: usage errors" {
 }
 
 test "run: N and K must be positive integers" {
-    for ([_][:0]const u8{ "0", "abc", "-5", "+5", "1.5", "99999999999999999999999" }) |bad| {
+    for ([_][:0]const u8{ "0", "abc", "-5", "+5", "1_000", " 5", "1.5", "99999999999999999999999" }) |bad| {
         var args = base_run;
         args[7] = bad;
         const r = parse(&args);

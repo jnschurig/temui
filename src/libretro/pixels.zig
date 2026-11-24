@@ -20,7 +20,7 @@ pub const Format = enum {
     }
 
     /// Maps a `retro_pixel_format` value; null for anything unsupported.
-    pub fn fromRetro(value: c_int) ?Format {
+    pub fn fromRetro(value: i64) ?Format {
         return switch (value) {
             0 => .rgb1555,
             1 => .xrgb8888,
@@ -174,6 +174,7 @@ test "fromRetro" {
     try testing.expectEqual(Format.rgb565, Format.fromRetro(2).?);
     try testing.expectEqual(null, Format.fromRetro(3));
     try testing.expectEqual(null, Format.fromRetro(-1));
+    try testing.expectEqual(null, Format.fromRetro(0xFFFF_FFFF));
 }
 
 test "fromRetro matches libretro.h" {
