@@ -4,6 +4,8 @@ const build_options = @import("build_options");
 const cli = @import("cli.zig");
 const paths = @import("paths.zig");
 const log = @import("log.zig");
+const run = @import("run.zig");
+const host = @import("libretro/host.zig");
 
 pub const std_options: std.Options = .{
     // Compile debug logging in; `log` filters by level at runtime.
@@ -60,6 +62,17 @@ pub fn main(init: std.process.Init) !u8 {
         // No ROM browser yet (item 08), so bare `temui` shows usage.
         .none, .help => try cli.usage(stdout, log_dir orelse "(unavailable: home directory not set)"),
         .version => try stdout.print("temui {s}\n", .{build_options.version}),
+        .run => {
+            var diag: host.Diagnostic = .{};
+            run.run(init.gpa, io, &opts.run, stdout, stderr, &diag) catch |err| {
+                const msg = if (diag.len > 0) diag.message() else @errorName(err);
+                std.log.err("run failed: {s}", .{msg});
+                try stdout.flush();
+                try stderr.print("temui: {s}\n", .{msg});
+                try stderr.flush();
+                return 1;
+            };
+        },
     }
     try stdout.flush();
     return 0;
@@ -71,6 +84,12 @@ test {
     _ = paths;
     _ = log;
     _ = @import("log_files.zig");
+    _ = @import("libretro/core_log.zig");
+    _ = @import("libretro/pixels.zig");
+    _ = @import("libretro/env.zig");
+    _ = @import("libretro/host.zig");
+    _ = @import("ppm.zig");
+    _ = run;
 }
 
 test "vendored libretro.h translates" {
