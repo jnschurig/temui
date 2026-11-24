@@ -39,7 +39,10 @@ mise install                              # install the pinned Zig
 zig build                                 # native binary: zig-out/bin/temui
 zig build test                            # unit tests
 zig build cross -Doptimize=ReleaseSafe    # all six targets: zig-out/<os>-<arch>/
+zig build bench                           # renderer benchmarks: zig-out/bin/temui-bench
 ```
+
+`temui-bench encode` times each renderer backend without a terminal; `temui-bench live` draws in the current terminal at a paced 60 fps and reports frame rate, frame-interval p99 and CPU (`temui-bench --help`).
 
 ## Running a core headless
 

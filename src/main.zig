@@ -116,6 +116,7 @@ test {
     _ = @import("render/ascii.zig");
     _ = @import("render/kitty.zig");
     _ = @import("render/Renderer.zig");
+    _ = @import("lib.zig");
 }
 
 test "vendored libretro.h translates" {
