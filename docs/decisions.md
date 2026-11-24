@@ -12,7 +12,7 @@ Status: accepted 2026-11-23. Facts marked *verified* were checked on that date (
 
 **Decision.** Write temui in Zig. Pin the Zig version in a committed `mise.toml` at the repo root (currently `zig = "0.17.1"`). That file is the single source of truth: local development and CI (`jdx/mise-action`) both install from it. `minimum_zig_version` in `build.zig.zon` is kept in sync only as a guard. `zig build` compiles in the C dependencies: `libretro.h` (header only), miniaudio, and SDL3 (gamepad subsystem only). TLS and zip extraction come from Zig's std, so there is no OpenSSL or zlib.
 
-**Rationale.** Zig cross-compiles C and Zig code for all six targets from a single host, with no per-target sysroots. It interoperates with C headers directly (`@cImport`), so the libretro ABI is used without bindings. It has no GC and no runtime, which suits frame-paced emulation. The author already knows it.
+**Rationale.** Zig cross-compiles C and Zig code for all six targets from a single host, with no per-target sysroots. It interoperates with C headers directly (translated to Zig by the build system's translate-C), so the libretro ABI is used without bindings. It has no GC and no runtime, which suits frame-paced emulation. The author already knows it.
 
 **Alternatives rejected.**
 - *Rust:* slow compiles, and cross-building C dependencies (SDL3, miniaudio) per target is more work.
