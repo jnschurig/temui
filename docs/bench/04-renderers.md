@@ -107,3 +107,7 @@ temui's own CPU was also lower than termbench's in spike 02 (zlib 0.60 against 2
 - The ASCII backend live, and the `sprites` and `testcore` sources live. Encode numbers only.
 - GPU time, and other machines.
 - No visual (smoothness) check was recorded for these runs.
+
+## Re-running after item 05
+
+Since item 05, every kitty placement carries a z-index (`z=-1073741825` by default; [D7](../decisions.md#d7-rendering--one-renderer-interface-three-backends-auto-selected)), so the play loop's overlay can draw over the image. `temui-bench` builds its renderer from the same detected choice, so its kitty runs send the `z=` key too, while the numbers above were measured without it. The key adds a few bytes per frame; whether a terminal composites a negative-z image differently, and so changes its CPU cost, has not been measured. Bear that in mind before comparing a new run with these results.

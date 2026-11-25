@@ -175,6 +175,7 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 - Throughput at 60 fps: measured in 02. Ghostty 1.4.0 and Rex 0.1.0-preview.19 pass 60 fps with every transport, and unpaced every kitty transport reaches 500 fps or more. Rex's reported slow frame rates did not reproduce, so half-block is not Rex's default. kitty, WezTerm, SSH and tmux are not measured; they use the default order until measured. Re-measured through the production renderer in 04 ([results](bench/04-renderers.md)): Ghostty with shm and Rex with zlib hold 60 fps with a p99 frame interval of about 20.5 ms, and temui's own cost is 0.3 and 0.6 ms per frame. Half-block also holds a paced 60 fps, but costs about 10 ms per frame for temui plus the terminal when every cell changes, about 3.5× kitty graphics.
 - Detection: some terminals answer the kitty query but perform poorly. Allow a per-terminal override in config.
 - tmux needs passthrough for kitty graphics (best-effort; half-block works).
+- Overlay over a kitty image (05): each placement carries a z-index, keyed by XTVERSION like the transport order. The default is `-1073741825`, which puts the image below cells with a non-default background, so the overlay's text cells (dark grey background) draw solidly on top. Half-block and ASCII don't emit the overlay's cells at all, and repaint them when it is hidden. Verified in Ghostty 1.4.0 and Rex ([results](bench/05-play-loop.md)). A terminal that ignores the negative z gets `-1` as its per-terminal value; none needs it yet.
 
 **Roadmap.** [02-spike-terminal-graphics](roadmap/02-spike-terminal-graphics.md), [04-renderers](roadmap/04-renderers.md), [17-sixel-renderer](roadmap/17-sixel-renderer.md).
 
@@ -195,7 +196,8 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 - *Dynamic rate control (RetroArch-style resampling):* more complex. Revisit if audio-paced timing proves insufficient.
 
 **Risks / open questions.**
-- Timer precision on Windows (default 15.6 ms tick); may need high-resolution waitable timers. → 05.
+- Timer precision on Windows (default 15.6 ms tick). **Implemented in 05:** the wait uses a high-resolution waitable timer (`CreateWaitableTimerExW` with `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`), and a unit test on the Windows CI runners checks that it wakes within tolerance. Not yet measured in a real Windows console.
+- The wall-clock pacer (05) keeps an absolute schedule, so jitter doesn't accumulate: 18000 frames in 300.0 s in Ghostty and Rex ([results](bench/05-play-loop.md)). When it falls more than 100 ms behind (a stall, a slow present), it re-bases to now instead of bursting to catch up. Under unthrottled speed, emulation gets at least the last present's cost per loop, so slow presents don't starve it.
 
 **Roadmap.** [05-play-loop](roadmap/05-play-loop.md), [09-audio](roadmap/09-audio.md), [13-attach-detach-viewer](roadmap/13-attach-detach-viewer.md).
 
@@ -285,7 +287,8 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 - *A log pane in the TUI:* possible later, but the file log comes first.
 
 **Risks / open questions.**
-- Cores can write to stdout themselves: snes9x 1.63 `printf`s `Map_HiROMMap` while loading a HiROM game, which would corrupt the display. Mitigation (to decide in [05](roadmap/05-play-loop.md)): before loading a core, `dup` fd 1 to a private descriptor for terminal output and point fd 1 (and fd 2) at the log file or the null device.
+- Cores can write to stdout themselves: snes9x 1.63 `printf`s `Map_HiROMMap` while loading a HiROM game, which would corrupt the display. **Mitigated in 05 (POSIX):** before loading a core, the session `dup`s fd 1 to a private descriptor that carries all terminal output, and points fds 1 and 2 at a non-blocking pipe. The play loop drains the pipe and logs each line as `core: stdio: …`. With logging off, fds 1 and 2 point at the null device instead. A pipe rather than the log file itself, because the logger writes at its own tracked offset (not `O_APPEND`), so two writers to the file would overwrite each other. On exit temui `fflush`es C stdio (which block-buffers a core's stdout once fd 1 is a pipe), drains the pipe, then restores fds 1 and 2. A panic or signal restores them too, so traces and the exit summary reach the terminal. Verified with snes9x, a LoROM game in Ghostty and a HiROM game in Rex ([results](bench/05-play-loop.md)).
+- **Not contained on Windows yet:** containment is a no-op there, so a core's output can still corrupt the display. A fix has to redirect the C runtime's stdout and stderr, not only the console handles.
 
 **Roadmap.** [01-scaffold](roadmap/01-scaffold.md) (file logging), [05-play-loop](roadmap/05-play-loop.md) (overlay).
 
@@ -362,8 +365,8 @@ tmux is best-effort: kitty graphics needs `allow-passthrough`, and half-block wo
 | Windows AF_UNIX works at runtime from Zig std | supported in source; untested | [12](roadmap/12-control-protocol-and-registry.md) (fallback: named pipes) |
 | Cross-platform shared memory for frames | open | [12](roadmap/12-control-protocol-and-registry.md) |
 | SDL3 gamepad-only static build on all six targets | open | [15](roadmap/15-gamepad.md) |
-| Cores writing to stdout corrupt the display (snes9x does; D13) | open | [05](roadmap/05-play-loop.md) |
-| Timer precision on Windows | open | [05](roadmap/05-play-loop.md) |
+| Cores writing to stdout corrupt the display (snes9x does; D13) | **retired on POSIX in 05**: fds 1 and 2 go to a pipe drained into the log; verified with snes9x in Ghostty and Rex ([results](bench/05-play-loop.md)); **open on Windows** (containment is a no-op there) | [05](roadmap/05-play-loop.md) |
+| Timer precision on Windows | **implemented in 05**: high-resolution waitable timer, wake tolerance unit-tested on the Windows CI runners; not measured in a real console | [05](roadmap/05-play-loop.md) |
 | Buildbot coverage of the six targets | **verified** — see below | — |
 
 ## Verified facts (2026-11-23)

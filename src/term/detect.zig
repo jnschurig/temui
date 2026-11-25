@@ -91,6 +91,7 @@ pub fn run(arena: std.mem.Allocator, io: Io, env: *const std.process.Environ.Map
         log.info("detect: Windows console; environment only", .{});
     } else {
         cs.winsize = winSize(1);
+        if (!session.pollable(0)) return error.InputNotPollable;
         const entered = !session.isActive();
         if (entered) try session.enter(.{ .alt_screen = false });
         defer if (entered) session.restore();
@@ -100,16 +101,45 @@ pub fn run(arena: std.mem.Allocator, io: Io, env: *const std.process.Environ.Map
     return cs;
 }
 
-/// `TIOCGWINSZ` on `fd`, or null if it isn't a terminal.
-pub fn winSize(fd: c.fd_t) ?caps.WinSize {
+/// What to tell the user on `error.InputNotPollable`.
+pub const input_not_pollable_msg = "stdin can't be waited on (macOS can't poll /dev/tty): run temui with the terminal itself as stdin, not </dev/tty";
+
+/// The window size of the terminal on `fd`, or null if it isn't one.
+/// POSIX: `TIOCGWINSZ`, with the pixel size when the terminal reports it.
+/// Windows: the console window rect (`GetConsoleScreenBufferInfo`), cells
+/// only; pixels are 0.
+pub fn winSize(fd: session.Fd) ?caps.WinSize {
     if (is_windows) {
-        return null;
+        var info: ConsoleScreenBufferInfo = undefined;
+        if (GetConsoleScreenBufferInfo(fd, &info) == .FALSE) return null;
+        const w = info.srWindow;
+        if (w.Right < w.Left or w.Bottom < w.Top) return null;
+        return .{
+            .cols = @intCast(@as(i32, w.Right) - w.Left + 1),
+            .rows = @intCast(@as(i32, w.Bottom) - w.Top + 1),
+            .px_w = 0,
+            .px_h = 0,
+        };
     } else {
         var ws: c.winsize = undefined;
         if (c.ioctl(fd, c.T.IOCGWINSZ, @intFromPtr(&ws)) != 0) return null;
         return .{ .cols = ws.col, .rows = ws.row, .px_w = ws.xpixel, .px_h = ws.ypixel };
     }
 }
+
+const Coord = extern struct { X: i16, Y: i16 };
+const SmallRect = extern struct { Left: i16, Top: i16, Right: i16, Bottom: i16 };
+const ConsoleScreenBufferInfo = extern struct {
+    dwSize: Coord,
+    dwCursorPosition: Coord,
+    wAttributes: u16,
+    srWindow: SmallRect,
+    dwMaximumWindowSize: Coord,
+};
+extern "kernel32" fn GetConsoleScreenBufferInfo(
+    hConsoleOutput: std.os.windows.HANDLE,
+    lpConsoleScreenBufferInfo: *ConsoleScreenBufferInfo,
+) callconv(.winapi) std.os.windows.BOOL;
 
 /// Runs both rounds: writes queries to `out_fd`, reads replies from
 /// `in_fd`, and folds them into `cs`. The terminal must already be in raw

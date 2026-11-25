@@ -23,8 +23,8 @@ pub fn run(arena: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
         };
     const choice = caps.select(cs, override, caps.osOf(builtin.os.tag));
     const r = report(cs, choice, override != null);
-    log.info("renderer: {t} ({s}) transports={any} ascii_color={t} cell_px={d}x{d}", .{
-        choice.backend, if (r.renderer.forced) "--renderer" else "auto", choice.transports.slice(), choice.ascii_color, choice.cell_px.w, choice.cell_px.h,
+    log.info("renderer: {t} ({s}) transports={any} kitty_z={d} ascii_color={t} cell_px={d}x{d}", .{
+        choice.backend, if (r.renderer.forced) "--renderer" else "auto", choice.transports.slice(), choice.kitty_z, choice.ascii_color, choice.cell_px.w, choice.cell_px.h,
     });
     if (json) {
         try std.json.Stringify.value(r, .{ .whitespace = .indent_2 }, out);
@@ -57,6 +57,8 @@ pub const Report = struct {
         forced: bool,
         /// Kitty only: transports in the order they'll be tried.
         transports: caps.Order,
+        /// Kitty only: placement z-index under `play`'s overlay.
+        kitty_z: ?i32,
         ascii_color: caps.AsciiColor,
     },
 };
@@ -78,7 +80,13 @@ pub fn report(cs: Capabilities, choice: caps.Choice, forced: bool) Report {
         .cell_px = px.px,
         .cell_px_source = px.source,
         .window = cs.winsize,
-        .renderer = .{ .backend = choice.backend, .forced = forced, .transports = choice.transports, .ascii_color = choice.ascii_color },
+        .renderer = .{
+            .backend = choice.backend,
+            .forced = forced,
+            .transports = choice.transports,
+            .kitty_z = if (choice.backend == .kitty) choice.kitty_z else null,
+            .ascii_color = choice.ascii_color,
+        },
     };
     for ([_]Transport{ .shm, .file, .zlib }) |t| if (cs.transports_ok.contains(t)) r.kitty_transports_ok.append(t);
     return r;
@@ -129,6 +137,7 @@ pub fn writeText(w: *std.Io.Writer, r: Report) !void {
             try w.writeAll("transport order: ");
             try writeList(w, r.renderer.transports.slice());
             try w.writeByte('\n');
+            if (r.renderer.kitty_z) |z| try w.print("overlay z-index: {d}\n", .{z});
         },
         .ascii => try w.print("ascii colour:    {t}\n", .{r.renderer.ascii_color}),
         .halfblock => {},
@@ -171,6 +180,7 @@ test "text report: Rex" {
         \\
         \\renderer:        kitty (auto)
         \\transport order: zlib, shm
+        \\overlay z-index: -1073741825
         \\
     , aw.written());
 }
@@ -206,6 +216,6 @@ test "JSON report: Rex" {
     defer aw.deinit();
     try std.json.Stringify.value(r, .{}, &aw.writer);
     try testing.expectEqualStrings(
-        \\{"terminal":"rex 0.1.0-preview.19","term":"xterm-256color","term_program":"Rex","colorterm":"truecolor","is_tty":true,"responded":true,"kitty_graphics":true,"kitty_transports_ok":["shm","zlib"],"kitty_keyboard_flags":0,"truecolor":true,"truecolor_source":"decrqss","cell_px":{"w":15,"h":29},"cell_px_source":"reply","window":{"cols":120,"rows":40,"px_w":1800,"px_h":1160},"renderer":{"backend":"kitty","forced":false,"transports":["zlib","shm"],"ascii_color":"truecolor"}}
+        \\{"terminal":"rex 0.1.0-preview.19","term":"xterm-256color","term_program":"Rex","colorterm":"truecolor","is_tty":true,"responded":true,"kitty_graphics":true,"kitty_transports_ok":["shm","zlib"],"kitty_keyboard_flags":0,"truecolor":true,"truecolor_source":"decrqss","cell_px":{"w":15,"h":29},"cell_px_source":"reply","window":{"cols":120,"rows":40,"px_w":1800,"px_h":1160},"renderer":{"backend":"kitty","forced":false,"transports":["zlib","shm"],"kitty_z":-1073741825,"ascii_color":"truecolor"}}
     , aw.written());
 }

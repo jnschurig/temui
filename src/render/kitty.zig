@@ -53,6 +53,9 @@ pub const Options = struct {
     prefix: []const u8 = "temui",
     /// Tests only: fixes the instance number instead of taking the next one.
     pair: ?u32 = null,
+    /// Placement z-index (`z=`); 0 sends none. `Renderer.init` sets it from
+    /// `Choice.kitty_z`, so an overlay's background cells cover the image.
+    z: i32 = 0,
 };
 
 const Object = struct { transport: Transport, serial: u64, created_ns: i96 };
@@ -61,6 +64,7 @@ pub const Kitty = struct {
     gpa: std.mem.Allocator,
     io: Io,
     cell_px: CellPx,
+    z: i32,
     pair: u32,
     ids: [2]u32,
     /// Index into `ids` for the next frame.
@@ -107,6 +111,7 @@ pub const Kitty = struct {
             .gpa = gpa,
             .io = io,
             .cell_px = cell_px,
+            .z = opts.z,
             .pair = pair,
             .ids = .{ 2 * pair + 1, 2 * pair + 2 },
             .transports = order,
@@ -182,9 +187,9 @@ pub const Kitty = struct {
 
         const i = k.next;
         try sgr.cup(w, box.row, box.col);
-        try w.print("\x1b_Ga=T,i={d},p=1,q=2,C=1,c={d},r={d},f={d},s={d},v={d}", .{
-            k.ids[i], box.cols, box.rows, @as(u32, if (payload == .zlib) 24 else 32), frame.width, frame.height,
-        });
+        try w.print("\x1b_Ga=T,i={d},p=1,q=2,C=1,c={d},r={d}", .{ k.ids[i], box.cols, box.rows });
+        if (k.z != 0) try w.print(",z={d}", .{k.z});
+        try w.print(",f={d},s={d},v={d}", .{ @as(u32, if (payload == .zlib) 24 else 32), frame.width, frame.height });
         switch (payload) {
             .zlib => |z| {
                 try w.writeAll(",o=z");
@@ -440,7 +445,7 @@ test "golden: zlib, test-core frame 60, 80×24 at 10×20 px cells" {
     const gpa = testing.allocator;
     const frame = try golden.loadFrame60(gpa);
     defer gpa.free(frame.rgb);
-    var k: Kitty = try .init(gpa, testing.io, golden.cell_px, zlib_only, .{ .pair = 0 });
+    var k: Kitty = try .init(gpa, testing.io, golden.cell_px, zlib_only, .{ .pair = 0, .z = caps.default_overlay_z });
     defer k.deinit();
     const out = try render(&k, frame, golden.rect);
     defer gpa.free(out);
@@ -451,7 +456,7 @@ test "golden: zlib, test-core frame 60, 80×24 at 10×20 px cells" {
 
     var buf: [256]Command = undefined;
     const cs = try commands(out, &buf);
-    try testing.expect(std.mem.startsWith(u8, cs[0].keys, "a=T,i=1,p=1,q=2,C=1,c=55,r=24,f=24,s=256,v=224,o=z,m=1"));
+    try testing.expect(std.mem.startsWith(u8, cs[0].keys, "a=T,i=1,p=1,q=2,C=1,c=55,r=24,z=-1073741825,f=24,s=256,v=224,o=z,m=1"));
     const z = try payloadOf(gpa, cs);
     defer gpa.free(z);
     try testing.expect(z.len < frame.rgb.len / 4);

@@ -53,30 +53,58 @@ pub const Pen = struct {
 /// re-sending a few cells is cheaper than another cursor move.
 pub const merge_gap = 2;
 
+/// A column range `[a, b)` within a row; empty when `a >= b`.
+pub const Span = [2]u32;
+pub const no_span: Span = .{ 0, 0 };
+
+fn inSpan(s: Span, i: u32) bool {
+    return i >= s[0] and i < s[1];
+}
+
 /// Iterates the runs `[a, b)` of a row where `new` differs from `old`
 /// (`Cell.eql`), merging runs separated by at most `merge_gap` unchanged
-/// cells.
+/// cells. Cells in `force` count as changed (a full redraw forces the whole
+/// row); cells in `skip` never do, and no run spans them (they are under an
+/// overlay the caller draws).
 pub fn ChangedRuns(comptime Cell: type) type {
     return struct {
         new: []const Cell,
         old: []const Cell,
+        force: Span = no_span,
+        skip: Span = no_span,
         x: u32 = 0,
+
+        fn changed(it: *const @This(), i: u32) bool {
+            if (inSpan(it.skip, i)) return false;
+            return inSpan(it.force, i) or !it.new[i].eql(it.old[i]);
+        }
 
         pub fn next(it: *@This()) ?[2]u32 {
             const n: u32 = @intCast(it.new.len);
-            while (it.x < n and it.new[it.x].eql(it.old[it.x])) it.x += 1;
+            while (it.x < n and !it.changed(it.x)) it.x += 1;
             if (it.x >= n) return null;
             const a = it.x;
             var last = a;
             var j = a + 1;
             // `j - last - 1` unchanged cells lie between `last` and `j`.
-            while (j < n and j - last - 1 <= merge_gap) : (j += 1) {
-                if (!it.new[j].eql(it.old[j])) last = j;
+            while (j < n and j - last - 1 <= merge_gap and !inSpan(it.skip, j)) : (j += 1) {
+                if (it.changed(j)) last = j;
             }
             it.x = last + 1;
             return .{ a, last + 1 };
         }
     };
+}
+
+/// The columns of `box` row `row` (absolute, 1-based) that `r` covers, as a
+/// span relative to `box.col`; `no_span` when `r` is null or misses the row.
+pub fn rowSpan(r: ?Rect, box: Rect, row: u32) Span {
+    const o = r orelse return no_span;
+    if (row < o.row or row >= o.row + o.rows) return no_span;
+    const a = @max(o.col, box.col);
+    const b = @min(o.col + o.cols, box.col + box.cols);
+    if (a >= b) return no_span;
+    return .{ a - box.col, b - box.col };
 }
 
 /// Resets SGR, then erases (ECH, default background) every cell of `rect`
@@ -148,6 +176,45 @@ test "ChangedRuns merges small gaps" {
     try std.testing.expectEqual(@as(?[2]u32, null), it.next());
     var none: ChangedRuns(C) = .{ .new = &old, .old = &old };
     try std.testing.expectEqual(@as(?[2]u32, null), none.next());
+}
+
+test "ChangedRuns: force redraws equal cells, skip is never drawn or bridged" {
+    const C = struct {
+        v: u8,
+        pub fn eql(a: @This(), b: @This()) bool {
+            return a.v == b.v;
+        }
+    };
+    const old: [12]C = @splat(.{ .v = 0 });
+    var new = old;
+    new[5].v = 1;
+    new[7].v = 1;
+    // A forced whole row with cells 4..6 skipped splits around them.
+    var full: ChangedRuns(C) = .{ .new = &new, .old = &old, .force = .{ 0, 12 }, .skip = .{ 4, 6 } };
+    try std.testing.expectEqual([2]u32{ 0, 4 }, full.next().?);
+    try std.testing.expectEqual([2]u32{ 6, 12 }, full.next().?);
+    try std.testing.expectEqual(@as(?[2]u32, null), full.next());
+    // Changed cells 5 and 7 with 6 skipped: 5 is hidden, 7 drawn alone (the
+    // gap merge would otherwise bridge 6).
+    var skip: ChangedRuns(C) = .{ .new = &new, .old = &old, .skip = .{ 5, 7 } };
+    try std.testing.expectEqual([2]u32{ 7, 8 }, skip.next().?);
+    try std.testing.expectEqual(@as(?[2]u32, null), skip.next());
+    // Uncovered cells 0..2 forced; merged with changed 5 across the gap.
+    var force: ChangedRuns(C) = .{ .new = &new, .old = &old, .force = .{ 0, 2 } };
+    try std.testing.expectEqual([2]u32{ 0, 2 }, force.next().?);
+    try std.testing.expectEqual([2]u32{ 5, 8 }, force.next().?);
+}
+
+test "rowSpan clips to the box" {
+    const box: Rect = .{ .col = 11, .row = 3, .cols = 20, .rows = 5 };
+    try std.testing.expectEqual(no_span, rowSpan(null, box, 3));
+    const o: Rect = .{ .col = 11, .row = 3, .cols = 8, .rows = 1 };
+    try std.testing.expectEqual(Span{ 0, 8 }, rowSpan(o, box, 3));
+    try std.testing.expectEqual(no_span, rowSpan(o, box, 4));
+    // Partly left of and past the right edge of the box.
+    try std.testing.expectEqual(Span{ 0, 4 }, rowSpan(.{ .col = 5, .row = 3, .cols = 10, .rows = 1 }, box, 3));
+    try std.testing.expectEqual(Span{ 15, 20 }, rowSpan(.{ .col = 26, .row = 3, .cols = 50, .rows = 1 }, box, 3));
+    try std.testing.expectEqual(no_span, rowSpan(.{ .col = 40, .row = 3, .cols = 5, .rows = 1 }, box, 3));
 }
 
 test "clearMargin with no margin only resets" {

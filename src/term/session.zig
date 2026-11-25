@@ -12,6 +12,13 @@
 //! its image store is separate from the main screen's, so no id registry is
 //! needed. Renderers still delete only their own ids in `clear`.
 //!
+//! With `contain_stdio` (POSIX), session output goes to a private
+//! duplicate of fd 1, and fds 1 and 2 are pointed at a pipe (or
+//! `/dev/null`), so a core's `printf` never lands on the screen. `restore`
+//! puts fds 1 and 2 back (`dup2`, async-signal-safe) so panics, signal
+//! traces and the exit summary reach the terminal. Windows doesn't redirect:
+//! CRT-level core output may reach the console (D13).
+//!
 //! SIGKILL can't be caught; `reset` recovers the terminal (see README).
 
 const std = @import("std");
@@ -33,6 +40,19 @@ pub const Options = struct {
     /// Enter the alternate screen and hide the cursor; otherwise only raw
     /// mode (e.g. for terminal detection).
     alt_screen: bool = true,
+    /// Keep the process's own stdout/stderr off the terminal (POSIX; a
+    /// no-op on Windows).
+    contain_stdio: Contain = .off,
+};
+
+pub const Contain = enum {
+    /// fds 1 and 2 stay on the terminal.
+    off,
+    /// fds 1 and 2 go to a pipe; the caller drains `stdioPipe()` (into the
+    /// log) and calls `flushContained` before `restore`.
+    pipe,
+    /// fds 1 and 2 go to `/dev/null` (logging disabled).
+    discard,
 };
 
 pub const Fd = if (is_windows) win.HANDLE else c.fd_t;
@@ -51,8 +71,14 @@ var out_fd: Fd = undefined;
 var saved: ?Saved = null;
 var cleanup: []const u8 = "";
 var handlers_installed = false;
+/// Containment state (POSIX): set by `enter` before `active`, cleared by
+/// `restore`. `saved_err` is a duplicate of the original fd 2; `out_fd` is
+/// then the private duplicate of the original fd 1.
+var contained = false;
+var saved_err: c.fd_t = -1;
+var stdio_read: c.fd_t = -1;
 
-pub const EnterError = error{ NotATerminal, AlreadyActive, WriteFailed };
+pub const EnterError = error{ NotATerminal, AlreadyActive, WriteFailed, ContainFailed };
 
 /// Puts the terminal into raw mode: no echo, no line buffering, no signals
 /// from keys (ISIG off, so Ctrl-C arrives as byte 0x03), and with
@@ -63,6 +89,12 @@ pub const EnterError = error{ NotATerminal, AlreadyActive, WriteFailed };
 pub fn enter(opts: Options) EnterError!void {
     if (active.load(.acquire)) return error.AlreadyActive;
     if (is_windows) try enterWindows() else try enterPosix();
+    if (!is_windows and opts.contain_stdio != .off) {
+        containPosix(opts.contain_stdio) catch {
+            _ = c.tcsetattr(in_fd, .FLUSH, &saved.?);
+            return error.ContainFailed;
+        };
+    }
     cleanup = if (opts.alt_screen) leave_alt else "";
     active.store(true, .release);
     installHandlers();
@@ -77,12 +109,59 @@ pub fn isActive() bool {
     return active.load(.acquire);
 }
 
-/// Undoes `enter`: writes the cleanup bytes and restores the saved terminal
-/// modes. Idempotent; safe to call from a signal handler, the panic handler,
-/// or with no session (does nothing).
+/// Where session output goes: the terminal (the private duplicate of fd 1
+/// under containment). Valid while a session is active.
+pub fn outFd() Fd {
+    return out_fd;
+}
+
+/// Where session input comes from: stdin (Windows: the console input
+/// handle). Valid while a session is active.
+pub fn inFd() Fd {
+    return in_fd;
+}
+
+/// Writes all of `bytes` to `outFd()`, retrying short writes and EINTR.
+pub fn writeOut(bytes: []const u8) error{WriteFailed}!void {
+    if (!writeAll(out_fd, bytes)) return error.WriteFailed;
+}
+
+/// The non-blocking read end of the containment pipe (`contain_stdio =
+/// .pipe`), or null. The caller drains it and owns it after `restore`.
+pub fn stdioPipe() ?Fd {
+    if (is_windows or stdio_read < 0) return null;
+    return stdio_read;
+}
+
+/// Flushes C stdio buffers (a core's stdout is block-buffered when fd 1 is
+/// a pipe) into the containment pipe. Call before `restore`, then drain the
+/// pipe once more, so buffered core output lands in the log rather than on
+/// the restored terminal. Not async-signal-safe.
+pub fn flushContained() void {
+    if (is_windows) return;
+    _ = fflush(null);
+}
+
+extern "c" fn fflush(stream: ?*anyopaque) c_int;
+
+/// Undoes `enter`: writes the cleanup bytes, puts fds 1 and 2 back on the
+/// terminal (under containment) and restores the saved terminal modes.
+/// Idempotent; safe to call from a signal handler, the panic handler, or
+/// with no session (does nothing).
 pub fn restore() void {
     if (!active.swap(false, .acq_rel)) return;
     _ = writeAll(out_fd, cleanup);
+    if (!is_windows and contained) {
+        contained = false;
+        _ = c.dup2(out_fd, 1);
+        _ = c.dup2(saved_err, 2);
+        // Known gap: the private `out_fd` and `saved_err` duplicates stay
+        // open, and `stdio_read` still names the pipe (which `play` closes),
+        // so `stdioPipe()` goes stale. Harmless while a process enters one
+        // contained session (`play`). Before a second one (the attach/detach
+        // viewer, item 13), close them and reset the fds in a teardown
+        // outside this signal path.
+    }
     if (saved) |*s| {
         if (is_windows) {
             _ = SetConsoleMode(in_fd, s.in_mode);
@@ -137,6 +216,58 @@ fn enterPosix() EnterError!void {
     if (c.tcsetattr(0, .FLUSH, &t) != 0) return error.NotATerminal;
 }
 
+/// Moves terminal output to a private fd and points fds 1 and 2 at a pipe
+/// or `/dev/null`. On error nothing has changed.
+fn containPosix(mode: Contain) error{ContainFailed}!void {
+    const term = c.fcntl(1, c.F.DUPFD_CLOEXEC, @as(c_int, 3));
+    if (term < 0) return error.ContainFailed;
+    errdefer _ = c.close(term);
+    const err = c.fcntl(2, c.F.DUPFD_CLOEXEC, @as(c_int, 3));
+    if (err < 0) return error.ContainFailed;
+    errdefer _ = c.close(err);
+
+    var read_end: c.fd_t = -1;
+    const target: c.fd_t = switch (mode) {
+        .off => unreachable,
+        .pipe => blk: {
+            var p: [2]c.fd_t = undefined;
+            if (c.pipe(&p) != 0) return error.ContainFailed;
+            // Read end: temui's, never blocks the loop. Write end: the
+            // core's; a flood drops output (EAGAIN) instead of blocking it.
+            if (!setNonblockCloexec(p[0]) or !setNonblockCloexec(p[1])) {
+                _ = c.close(p[0]);
+                _ = c.close(p[1]);
+                return error.ContainFailed;
+            }
+            read_end = p[0];
+            break :blk p[1];
+        },
+        .discard => c.open("/dev/null", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }),
+    };
+    if (target < 0) return error.ContainFailed;
+    // dup2 clears close-on-exec on 1 and 2, as for ordinary stdio.
+    if (c.dup2(target, 1) < 0 or c.dup2(target, 2) < 0) {
+        _ = c.dup2(term, 1);
+        _ = c.dup2(err, 2);
+        _ = c.close(target);
+        if (read_end >= 0) _ = c.close(read_end);
+        return error.ContainFailed;
+    }
+    _ = c.close(target);
+    out_fd = term;
+    saved_err = err;
+    stdio_read = read_end;
+    contained = true;
+}
+
+fn setNonblockCloexec(fd: c.fd_t) bool {
+    const fl = c.fcntl(fd, c.F.GETFL);
+    if (fl < 0) return false;
+    const nonblock: c_int = @bitCast(@as(u32, @bitCast(c.O{ .NONBLOCK = true })));
+    if (c.fcntl(fd, c.F.SETFL, fl | nonblock) != 0) return false;
+    return c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC)) == 0;
+}
+
 /// Termination requests, and crashes (a fault in a libretro core, `abort`).
 const caught = if (is_windows) [_]void{} else [_]posix.SIG{ .INT, .TERM, .HUP, .QUIT, .ABRT, .SEGV, .BUS, .ILL, .FPE };
 /// The action each `caught` signal had before (default, or Zig's segfault
@@ -181,6 +312,17 @@ pub const Input = struct {
     quit: bool,
 };
 
+/// Whether `poll` works on `fd`. macOS can't poll `/dev/tty` (the
+/// controlling-terminal alias): `poll` reports POLLNVAL at once, so a wait
+/// would spin and the following `read` would block. Seen when stdin is
+/// redirected from `/dev/tty`. POSIX only; true on Windows.
+pub fn pollable(fd: Fd) bool {
+    if (is_windows) return true;
+    var fds = [_]c.pollfd{.{ .fd = fd, .events = c.POLL.IN, .revents = 0 }};
+    if (c.poll(&fds, 1, 0) < 0) return true; // EINTR and the like: not this problem
+    return fds[0].revents & c.POLL.NVAL == 0;
+}
+
 /// Waits up to `timeout_ms` (negative: forever) for input on `fd`, reads
 /// what's there into `buf`, and flags Ctrl-C / `q`. POSIX only: Windows
 /// console input is event-based and arrives with item 06.
@@ -209,6 +351,7 @@ pub fn pollInput(fd: Fd, buf: []u8, timeout_ms: i32) !Input {
 const ENABLE_PROCESSED_INPUT: win.DWORD = 0x0001;
 const ENABLE_LINE_INPUT: win.DWORD = 0x0002;
 const ENABLE_ECHO_INPUT: win.DWORD = 0x0004;
+const ENABLE_WINDOW_INPUT: win.DWORD = 0x0008;
 const ENABLE_VIRTUAL_TERMINAL_INPUT: win.DWORD = 0x0200;
 const ENABLE_PROCESSED_OUTPUT: win.DWORD = 0x0001;
 const ENABLE_VIRTUAL_TERMINAL_PROCESSING: win.DWORD = 0x0004;
@@ -236,7 +379,7 @@ fn enterWindows() EnterError!void {
     in_fd = in;
     out_fd = out;
     saved = .{ .in_mode = in_mode, .out_mode = out_mode, .out_cp = GetConsoleOutputCP() };
-    const raw_in = (in_mode & ~(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT;
+    const raw_in = (in_mode & ~(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_WINDOW_INPUT;
     if (SetConsoleMode(in, raw_in) == .FALSE) return error.NotATerminal;
     const vt_out = out_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     if (SetConsoleMode(out, vt_out) == .FALSE) {
@@ -355,6 +498,16 @@ test "enter fails cleanly without a terminal" {
     try testing.expect(!isActive());
 }
 
+test "pollable: a pipe is, a closed fd is not" {
+    if (is_windows) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.pipe(&fds));
+    defer _ = c.close(fds[1]);
+    try testing.expect(pollable(fds[0]));
+    _ = c.close(fds[0]);
+    try testing.expect(!pollable(fds[0]));
+}
+
 test "pollInput flags Ctrl-C and q, and times out" {
     if (is_windows) return error.SkipZigTest;
     var fds: [2]c.fd_t = undefined;
@@ -379,4 +532,92 @@ test "pollInput flags Ctrl-C and q, and times out" {
     // Writer gone: end of input counts as quit.
     _ = c.close(fds[1]);
     try testing.expect((try pollInput(fds[0], &buf, 100)).quit);
+}
+
+extern "c" fn printf(format: [*:0]const u8, ...) c_int;
+
+fn readToEof(fd: c.fd_t, buf: []u8) ![]u8 {
+    var len: usize = 0;
+    while (len < buf.len) {
+        const n = c.read(fd, buf[len..].ptr, buf.len - len);
+        if (n < 0) {
+            if (c._errno().* == @backingInt(c.E.INTR)) continue;
+            return error.ReadFailed;
+        }
+        if (n == 0) break;
+        len += @intCast(n);
+    }
+    return buf[0..len];
+}
+
+/// Runs a contained session in a forked child whose fds 1 and 2 are a pipe
+/// standing in for the terminal (the test runner's own stdout is its IPC
+/// channel, so it must not be redirected in-process). The child writes to
+/// fd 1 with C stdio (block-buffered, as a core's would be) and to fd 2,
+/// flushes, forwards what it drained from the containment pipe on `fwd`,
+/// restores (twice), and writes again. Returns the "terminal" and drained
+/// bytes.
+fn runContained(mode: Contain, term_buf: []u8, drained_buf: []u8) !struct { term: []u8, drained: []u8 } {
+    var term: [2]c.fd_t = undefined;
+    var fwd: [2]c.fd_t = undefined;
+    if (c.pipe(&term) != 0 or c.pipe(&fwd) != 0) return error.PipeFailed;
+    const pid = c.fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        _ = c.close(term[0]);
+        _ = c.close(fwd[0]);
+        if (c.dup2(term[1], 1) < 0 or c.dup2(term[1], 2) < 0) c._exit(10);
+        _ = c.close(term[1]);
+        saved = null;
+        containPosix(mode) catch c._exit(11);
+        cleanup = leave_alt;
+        active.store(true, .release);
+        if (outFd() == 1) c._exit(12);
+        if ((stdioPipe() != null) != (mode == .pipe)) c._exit(13);
+
+        _ = printf("printf-text\n");
+        _ = c.write(2, "err-text\n", 9);
+        flushContained();
+        if (stdioPipe()) |r| {
+            var buf: [256]u8 = undefined;
+            const n = c.read(r, &buf, buf.len);
+            if (n > 0) _ = c.write(fwd[1], &buf, @intCast(n));
+        }
+        restore();
+        restore();
+        _ = c.write(1, "after1\n", 7);
+        _ = c.write(2, "after2\n", 7);
+        _ = printf("after3\n");
+        _ = fflush(null);
+        c._exit(0);
+    }
+    _ = c.close(term[1]);
+    _ = c.close(fwd[1]);
+    defer _ = c.close(term[0]);
+    defer _ = c.close(fwd[0]);
+    var status: c_int = 0;
+    if (c.waitpid(pid, &status, 0) != pid) return error.WaitFailed;
+    const st: u32 = @bitCast(status);
+    try testing.expect(posix.W.IFEXITED(st));
+    try testing.expectEqual(@as(u32, 0), posix.W.EXITSTATUS(st));
+    return .{ .term = try readToEof(term[0], term_buf), .drained = try readToEof(fwd[0], drained_buf) };
+}
+
+test "contain_stdio pipe: stdio goes to the pipe, never the terminal; restore puts it back" {
+    if (is_windows) return error.SkipZigTest;
+    var tb: [512]u8 = undefined;
+    var db: [512]u8 = undefined;
+    const r = try runContained(.pipe, &tb, &db);
+    try testing.expectEqualStrings(leave_alt ++ "after1\nafter2\nafter3\n", r.term);
+    // Unbuffered fd 2 arrives first; C stdio's buffer only on fflush.
+    try testing.expectEqualStrings("err-text\nprintf-text\n", r.drained);
+}
+
+test "contain_stdio discard: stdio is dropped; restore puts it back" {
+    if (is_windows) return error.SkipZigTest;
+    var tb: [512]u8 = undefined;
+    var db: [512]u8 = undefined;
+    const r = try runContained(.discard, &tb, &db);
+    try testing.expectEqualStrings(leave_alt ++ "after1\nafter2\nafter3\n", r.term);
+    try testing.expectEqualStrings("", r.drained);
 }

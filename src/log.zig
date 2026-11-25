@@ -249,6 +249,11 @@ pub fn deinit() void {
     global_dir = null;
 }
 
+/// Whether logging is on (`init` succeeded and `deinit` hasn't run).
+pub fn isActive() bool {
+    return global_active;
+}
+
 /// `std_options.logFn`. Drops messages until `init` succeeds.
 pub fn logFn(
     comptime level: std.log.Level,

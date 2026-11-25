@@ -37,6 +37,8 @@ pub fn build(b: *std.Build) !void {
     const test_options = b.addOptions();
     test_options.addOptionPath("test_core_path", testcore.getEmittedBin());
     test_options.addOptionPath("testcore_rom", b.path("testdata/testcore.rom"));
+    // The built binary, for the end-to-end `play` smoke test (a subprocess).
+    test_options.addOptionPath("temui_exe", exe.getEmittedBin());
     // One option per file, so editing a golden invalidates the cached test run.
     for ([_][]const u8{ "xrgb8888", "rgb565", "0rgb1555" }) |f| {
         test_options.addOptionPath(b.fmt("golden_{s}", .{f}), b.path(b.fmt("testdata/golden/testcore-{s}-f60.ppm", .{f})));
@@ -193,6 +195,8 @@ fn makeTestCore(
             .root_source_file = b.path("testcore/main.zig"),
             .target = target,
             .optimize = optimize,
+            // C stdio, for the opt-in stdout marker (temui_test_stdout_marker).
+            .link_libc = true,
             .imports = &.{.{ .name = "libretro", .module = libretroModule(b, target, optimize) }},
         }),
     });

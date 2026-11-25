@@ -129,10 +129,28 @@ pub fn preferenceOrder(name: ?[]const u8) [3]Transport {
     return .{ .shm, .file, .zlib };
 }
 
+/// Kitty z-index just below cells with a non-default background
+/// (< -1,073,741,824 in the protocol): an overlay's background box covers
+/// the image while the default-background cells around it don't.
+pub const default_overlay_z: i32 = -1_073_741_825;
+
+/// Terminals known not to honour `default_overlay_z` (XTVERSION's first
+/// word); they get z = -1, glyphs over the image with no background box.
+/// Empty until one is found (roadmap 05, step 10).
+const no_overlay_z = [_][]const u8{};
+
+/// The z-index for kitty images when temui draws an overlay over them.
+pub fn overlayZ(name: ?[]const u8) i32 {
+    if (name) |n| for (no_overlay_z) |t| if (std.ascii.eqlIgnoreCase(n, t)) return -1;
+    return default_overlay_z;
+}
+
 pub const Choice = struct {
     backend: Backend,
     /// Kitty only: transports to try in order; inline zlib is always present.
     transports: Order = .{},
+    /// Kitty only: placement z-index (0: the protocol default, no `z=`).
+    kitty_z: i32 = 0,
     ascii_color: AsciiColor,
     cell_px: CellPx,
 };
@@ -174,6 +192,7 @@ pub fn select(c: Capabilities, override: ?Backend, os: Os) Choice {
             }
         }
         if (!choice.transports.contains(.zlib)) choice.transports.append(.zlib);
+        choice.kitty_z = overlayZ(c.terminalName());
     }
     return choice;
 }
@@ -218,6 +237,7 @@ test "rex: kitty, inline zlib first" {
     const ch = select(c, null, .posix);
     try testing.expectEqual(Backend.kitty, ch.backend);
     try expectOrder(&.{ .zlib, .shm, .file }, ch);
+    try testing.expectEqual(default_overlay_z, ch.kitty_z);
     try testing.expectEqual(CellPx{ .w = 15, .h = 29 }, ch.cell_px);
     try testing.expectEqual(AsciiColor.truecolor, ch.ascii_color);
 }
@@ -296,6 +316,7 @@ test "dumb terminal: nothing answers → ASCII, mono, assumed cell" {
     try testing.expectEqual(AsciiColor.none, ch.ascii_color);
     try testing.expectEqual(assumed_cell_px, ch.cell_px);
     try testing.expectEqual(@as(u8, 0), ch.transports.len);
+    try testing.expectEqual(@as(i32, 0), ch.kitty_z);
 }
 
 test "256-colour terminal without truecolor → ASCII with 256 colours" {
@@ -347,6 +368,13 @@ test "cell size fallbacks" {
     const no_px: Capabilities = .{ .winsize = .{ .cols = 80, .rows = 24 } };
     try testing.expectEqual(Capabilities.CellPxSource.assumed, no_px.cellPx().source);
     try testing.expectEqual(assumed_cell_px, no_px.cellPx().px);
+}
+
+test "overlay z-index" {
+    try testing.expectEqual(default_overlay_z, overlayZ("ghostty"));
+    try testing.expectEqual(default_overlay_z, overlayZ(null));
+    try testing.expect(default_overlay_z < -1_073_741_824);
+    try testing.expectEqual(default_overlay_z, select(.{ .is_tty = true }, .kitty, .posix).kitty_z);
 }
 
 test "preference order" {
