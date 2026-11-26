@@ -152,6 +152,10 @@ test {
     _ = @import("play/Pacer.zig");
     _ = @import("play/Stats.zig");
     _ = @import("play/overlay.zig");
+    _ = @import("play/text.zig");
+    _ = @import("play/statusline.zig");
+    _ = @import("play/boxes.zig");
+    _ = @import("play/TestScreen.zig");
     _ = @import("play/keys.zig");
     _ = @import("play/bindings.zig");
     _ = @import("play/ReleaseGuesser.zig");

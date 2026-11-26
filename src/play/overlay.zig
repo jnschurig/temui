@@ -3,6 +3,9 @@
 //! `enc` is the time spent encoding frames and `wr` the time spent writing
 //! them, both per second of wall time.
 //! Drawing it is the viewer's job; this only builds the string.
+//!
+//! The status line uses the two halves: `writeDetailed` (everything but
+//! emulated fps and speed) and `writeBasic` (`60.0 fps · 1×`, `paused`).
 
 const std = @import("std");
 const Pacer = @import("Pacer.zig");
@@ -27,13 +30,32 @@ pub fn format(buf: *[max_len]u8, st: State, max_cols: usize) []const u8 {
     return truncate(w.buffered(), max_cols);
 }
 
+const sep = " · ";
+
 fn write(w: *std.Io.Writer, st: State) std.Io.Writer.Error!void {
-    const sep = " · ";
     try w.print("emu {d:.1}" ++ sep ++ "pres {d:.1}" ++ sep, .{
         clampRate(st.rates.emulated_fps), clampRate(st.rates.presented_fps),
     });
     try writeSpeed(w, st.speed, st.paused);
     try w.writeAll(sep);
+    try writeRest(w, st);
+}
+
+/// `pres 60.0 · 2.1 MB/s · enc 1.2 ms/s · wr 3.0 ms/s · lag 2`, at most
+/// `max_len` bytes.
+pub fn writeDetailed(w: *std.Io.Writer, st: State) std.Io.Writer.Error!void {
+    try w.print("pres {d:.1}" ++ sep, .{clampRate(st.rates.presented_fps)});
+    try writeRest(w, st);
+}
+
+/// `60.0 fps · 1×`, `240.0 fps · max`, or `paused`.
+pub fn writeBasic(w: *std.Io.Writer, st: State) std.Io.Writer.Error!void {
+    if (st.paused) return w.writeAll("paused");
+    try w.print("{d:.1} fps" ++ sep, .{clampRate(st.rates.emulated_fps)});
+    try writeSpeed(w, st.speed, false);
+}
+
+fn writeRest(w: *std.Io.Writer, st: State) std.Io.Writer.Error!void {
     try writeBytes(w, st.rates.bytes_per_s);
     try w.writeAll(sep ++ "enc ");
     try writeMs(w, st.rates.encode_ns_per_s);
@@ -169,6 +191,21 @@ test "truncation counts cells, not bytes" {
     try expectLine("emu 60.0 ·", st, 10);
     try expectLine("emu 60.0 · pres 60.0 · 1×", st, 25);
     try expectLine("", st, 0);
+}
+
+fn expectWith(comptime f: fn (*std.Io.Writer, State) std.Io.Writer.Error!void, want: []const u8, st: State) !void {
+    var buf: [max_len]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try f(&w, st);
+    try testing.expectEqualStrings(want, w.buffered());
+}
+
+test "detailed and basic halves" {
+    const st: State = .{ .rates = steady, .speed = .normal, .paused = false, .rebases = 2 };
+    try expectWith(writeDetailed, "pres 60.0 · 2.1 MB/s · enc 1.2 ms/s · wr 3.0 ms/s · lag 2", st);
+    try expectWith(writeBasic, "60.0 fps · 1×", st);
+    try expectWith(writeBasic, "60.0 fps · max", .{ .rates = steady, .speed = .max, .paused = false, .rebases = 0 });
+    try expectWith(writeBasic, "paused", .{ .rates = steady, .speed = .max, .paused = true, .rebases = 0 });
 }
 
 test "extreme values still fit" {
