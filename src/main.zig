@@ -156,13 +156,13 @@ test {
     _ = @import("play/statusline.zig");
     _ = @import("play/boxes.zig");
     _ = @import("play/TestScreen.zig");
-    _ = @import("play/keys.zig");
     _ = @import("play/bindings.zig");
     _ = @import("play/ReleaseGuesser.zig");
     _ = @import("play/Modes.zig");
     _ = @import("play/stdio.zig");
     _ = @import("play/events.zig");
     _ = @import("play/Watchdog.zig");
+    _ = @import("play/input_test.zig");
     _ = @import("play/Engine.zig");
     _ = @import("play/Viewer.zig");
     _ = @import("play/smoke_test.zig");

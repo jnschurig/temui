@@ -180,7 +180,7 @@ const ns_per_s = std.time.ns_per_s;
 
 /// Every read advances it by `per_read`, then returns it: the cost of a
 /// frame, as the engine reads the clock once after each frame it runs.
-const FakeClock = struct {
+pub const FakeClock = struct {
     t: i96 = 0,
     per_read: i96 = 0,
 
@@ -190,12 +190,12 @@ const FakeClock = struct {
         return f.t;
     }
 
-    fn clock(f: *FakeClock) Clock {
+    pub fn clock(f: *FakeClock) Clock {
         return .{ .ctx = f, .nowFn = read };
     }
 };
 
-fn loadTestCore() !void {
+pub fn loadTestCore() !void {
     const o = @import("test_options");
     const dir = std.fs.path.dirname(o.testcore_rom) orelse ".";
     var diag: host.Diagnostic = .{};
@@ -220,12 +220,12 @@ fn coreFrames() u32 {
 
 /// The input bitmask the test core saw on its last frame: u16 LE at SRAM
 /// offset 4.
-fn coreButtons() u16 {
+pub fn coreButtons() u16 {
     const sram = host.memory(lr.RETRO_MEMORY_SAVE_RAM).?;
     return std.mem.readInt(u16, sram[4..6], .little);
 }
 
-const no_budget = std.math.maxInt(u64);
+pub const no_budget = std.math.maxInt(u64);
 
 test "N steps while paused advance the core's frame counter by exactly N" {
     try loadTestCore();

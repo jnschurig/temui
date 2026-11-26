@@ -25,11 +25,29 @@ const Renderer = @import("render/Renderer.zig");
 const Engine = @import("play/Engine.zig");
 const Viewer = @import("play/Viewer.zig");
 const Events = @import("play/events.zig");
-const keys = @import("play/keys.zig");
+const Modes = @import("play/Modes.zig");
+const Watchdog = @import("play/Watchdog.zig");
+const key_decoder = @import("term/key_decoder.zig");
 const overlay = @import("play/overlay.zig");
 const stdio = @import("play/stdio.zig");
 
 const log = std.log.scoped(.play);
+const is_windows = builtin.os.tag == .windows;
+
+/// The kitty keyboard flags pushed (D9): disambiguate, event types,
+/// alternate keys and all keys as escape codes.
+const kitty_flags: u8 = 15;
+
+/// The input path: Windows console input always; otherwise `--keyboard`,
+/// with `auto` following detection.
+fn inputPath(k: cli.Keyboard, detected: bool, windows: bool) Modes.Path {
+    if (windows) return .console;
+    return switch (k) {
+        .kitty => .kitty,
+        .legacy => .legacy,
+        .auto => if (detected) .kitty else .legacy,
+    };
+}
 const ns_per_s = std.time.ns_per_s;
 
 /// Bounds for `engineBudget`: at least `min_budget_ns`, so an overdue
@@ -102,9 +120,22 @@ pub fn run(
         choice.cell_px.w,          choice.cell_px.h,
     });
 
+    const path = inputPath(p.keyboard, cs.kitty_keyboard_flags != null, is_windows);
+    if (is_windows) {
+        log.info("keyboard: console input{s}", .{if (p.keyboard != .auto) " (--keyboard is ignored on Windows)" else ""});
+    } else {
+        log.info("keyboard: {t} ({s}){s}", .{
+            path,                                             if (p.keyboard == .auto) "detected" else "--keyboard",
+            if (path == .kitty) ", pushing flags 15" else "",
+        });
+    }
+
     session.enter(.{
         .alt_screen = true,
         .contain_stdio = if (log_mod.isActive()) .pipe else .discard,
+        .kitty_keyboard_flags = if (path == .kitty) kitty_flags else null,
+        .focus_events = true,
+        .vt_input = false,
     }) catch |err| {
         diag.set("cannot set up the terminal: {t}", .{err});
         return err;
@@ -141,10 +172,16 @@ pub fn run(
         core_fps, SpeedFmt{ .s = p.speed }, present_fps, if (p.paused) ", paused" else "",
     });
 
+    const si = host.systemInfo();
+    const game = try std.fmt.allocPrint(arena_state.allocator(), "{s} · {s} {s}", .{ std.fs.path.stem(p.rom), si.name, si.version });
+
+    // Armed just before the first wait; stopped (below) before teardown.
+    var watchdog: Watchdog = .init(io, .{ .in = session.inFd() });
     var events: Events = Events.init(io, .{
         .in = session.inFd(),
         .out = session.outFd(),
         .stdio = pipe_fd,
+        .handback = watchdog.handback(),
     }) catch |err| {
         diag.set("cannot wait for terminal events: {t}", .{err});
         return err;
@@ -160,14 +197,20 @@ pub fn run(
         return err;
     };
     defer viewer.deinit(engine.stats());
+    // Runs before the teardown above: nothing below may race the thread.
+    defer watchdog.stop();
 
     // `--paused` shows the first frame: one step, presented at once.
     if (p.paused) engine.apply(.step, clock.now());
 
+    var fx: Modes.Effects = .{};
+    var modes: Modes = .init(.{ .path = path, .mode_key = p.mode_key, .start_paused = p.paused }, &fx);
+    _ = applyEffects(&fx, &engine, &viewer, clock.now());
+    var decoder: key_decoder.Decoder = .init(if (path == .kitty) .kitty else .legacy);
+
     const start = clock.now();
     const end_ns: ?i96 = if (p.duration_s) |s| start + @as(i96, @intFromFloat(s * ns_per_s)) else null;
     var next_log = start + ns_per_s;
-    var decoder: keys.Decoder = .{};
 
     loop: while (true) {
         var now = clock.now();
@@ -186,8 +229,8 @@ pub fn run(
             .aspect = if (engine.aspect()) |a| @floatCast(a) else null,
             .on_schedule = engine.onSchedule(),
             .status = status(&engine, now),
-            // Until `Modes` is wired in (roadmap 06, step 10).
-            .view = .{ .mode = .game, .legacy = false, .menu = null, .box = null },
+            .view = modes.view(),
+            .game = game,
         }, engine.stats(), now) catch |err| {
             diag.set("drawing failed: {t}", .{err});
             return err;
@@ -204,6 +247,14 @@ pub fn run(
         deadline = earliest(deadline, viewer.nextDeadline(engine.frameSeq(), now));
         deadline = earliest(deadline, next_log);
         deadline = earliest(deadline, end_ns);
+        deadline = earliest(deadline, modes.nextDeadline());
+        if (!is_windows) deadline = earliest(deadline, decoder.deadline());
+
+        // Armed once the loop runs, so detection and core loading never count.
+        if (watchdog.thread == null) watchdog.start() catch |err| {
+            diag.set("cannot start the watchdog thread: {t}", .{err});
+            return err;
+        };
 
         const wake = events.wait(deadline) catch |err| {
             diag.set("waiting for input failed: {t}", .{err});
@@ -219,24 +270,27 @@ pub fn run(
         };
         if (wake.stdio_ready) if (drain) |*d| d.drain(stdio.LogSink{});
 
-        var it = decoder.feed(wake.input, clock.now());
-        while (it.next()) |action| {
-            const t = clock.now();
-            switch (action) {
-                .quit => break :loop,
-                .toggle_pause => engine.apply(if (engine.paused()) .@"resume" else .pause, t),
-                .step => if (engine.paused()) {
-                    engine.apply(.step, t);
-                    viewer.forcePresent();
-                },
-                .faster => engine.apply(.faster, t),
-                .slower => engine.apply(.slower, t),
-                .reset_speed => engine.apply(.reset_speed, t),
-                .toggle_overlay => viewer.toggleStats(),
+        const t = clock.now();
+        if (is_windows) {
+            for (wake.keys) |in| {
+                modes.handle(in, t, engine.paused(), &fx);
+                if (applyEffects(&fx, &engine, &viewer, t)) break :loop;
             }
-            if (action != .toggle_overlay) viewer.statusChanged();
-            log.debug("key: {t} (speed {f}{s})", .{ action, SpeedFmt{ .s = engine.speed() }, if (engine.paused()) ", paused" else "" });
+        } else {
+            var it = decoder.feed(wake.input, t);
+            while (it.next()) |in| {
+                modes.handle(in, t, engine.paused(), &fx);
+                if (applyEffects(&fx, &engine, &viewer, t)) break :loop;
+            }
+            if (decoder.expire(t)) |in| modes.handle(in, t, engine.paused(), &fx);
+            if (modes.path == .kitty and decoder.sawLegacyKey()) {
+                log.warn("the kitty keyboard protocol isn't active (a key arrived in legacy form): switching to legacy input", .{});
+                decoder.switchToLegacy();
+                modes.switchToLegacy(engine.paused(), &fx);
+            }
         }
+        modes.tick(t, &fx);
+        if (applyEffects(&fx, &engine, &viewer, t)) break :loop;
     }
 
     const now = clock.now();
@@ -244,6 +298,25 @@ pub fn run(
     log.info("final stats: {s}", .{overlay.format(&buf, status(&engine, now), overlay.max_len)});
     try engine.stats().summary(summary, now);
     log.info("summary: {s}", .{std.mem.trimEnd(u8, summary.buffered(), "\n")});
+}
+
+/// Carries out `Modes`' effects, then clears them. Returns true to quit.
+fn applyEffects(fx: *Modes.Effects, engine: *Engine, viewer: *Viewer, t: i96) bool {
+    defer fx.clear();
+    var quit = false;
+    for (fx.slice()) |e| switch (e) {
+        .engine => |cmd| {
+            engine.apply(cmd, t);
+            if (cmd != .set_input) viewer.statusChanged();
+        },
+        // The viewer compares the layers itself; this refreshes the status
+        // line at once too.
+        .layers_changed => viewer.statusChanged(),
+        .toggle_stats => viewer.toggleStats(),
+        .force_present => viewer.forcePresent(),
+        .quit => quit = true,
+    };
+    return quit;
 }
 
 fn status(e: *Engine, now: i96) overlay.State {
@@ -284,6 +357,15 @@ const SpeedFmt = struct {
         }
     }
 };
+
+test "input path: Windows is always console; auto follows detection" {
+    try std.testing.expectEqual(Modes.Path.console, inputPath(.legacy, true, true));
+    try std.testing.expectEqual(Modes.Path.console, inputPath(.auto, false, true));
+    try std.testing.expectEqual(Modes.Path.kitty, inputPath(.auto, true, false));
+    try std.testing.expectEqual(Modes.Path.legacy, inputPath(.auto, false, false));
+    try std.testing.expectEqual(Modes.Path.kitty, inputPath(.kitty, false, false));
+    try std.testing.expectEqual(Modes.Path.legacy, inputPath(.legacy, true, false));
+}
 
 test "engine budget: up to the next present, never less than the last present took" {
     const ms = std.time.ns_per_ms;
