@@ -30,8 +30,33 @@ pub const KeyEventRecord = extern struct {
     dwControlKeyState: u32,
 };
 
+pub const KEY_EVENT: u16 = 0x0001;
+pub const WINDOW_BUFFER_SIZE_EVENT: u16 = 0x0004;
+pub const FOCUS_EVENT: u16 = 0x0010;
+
+/// `INPUT_RECORD`.
+pub const InputRecord = extern struct {
+    EventType: u16,
+    Event: extern union {
+        key: KeyEventRecord,
+        /// `FOCUS_EVENT_RECORD.bSetFocus`.
+        focus: i32,
+        /// Mouse, window size and menu records; only the type matters.
+        other: [16]u8,
+    },
+
+    pub fn keyRecord(k: KeyEventRecord) InputRecord {
+        return .{ .EventType = KEY_EVENT, .Event = .{ .key = k } };
+    }
+
+    pub fn focusRecord(gained: bool) InputRecord {
+        return .{ .EventType = FOCUS_EVENT, .Event = .{ .focus = @intFromBool(gained) } };
+    }
+};
+
 comptime {
     std.debug.assert(@sizeOf(KeyEventRecord) == 16);
+    std.debug.assert(@sizeOf(InputRecord) == 20);
 }
 
 /// The layout's unshifted character for a virtual-key code, or 0.

@@ -36,6 +36,19 @@ pub const enter_alt = "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H\x1b_Ga=d,d=A,q=2\x1b\\"
 /// screen left.
 pub const leave_alt = "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[0m\x1b[?25h\x1b[?1049l";
 
+/// String terminator. Leads every cleanup string, so a kitty image
+/// sequence cut off mid-write (a crash, a signal) is closed and the rest of
+/// the cleanup is read as commands, not as image data.
+pub const string_terminator = "\x1b\\";
+/// Focus reporting (`CSI I` / `CSI O`) on and off.
+pub const focus_on = "\x1b[?1004h";
+pub const focus_off = "\x1b[?1004l";
+/// Pops the kitty keyboard flags pushed at `enter`.
+pub const kitty_pop = "\x1b[<u";
+/// Asks for the current kitty keyboard flags, then sends DA1 as a sentinel:
+/// a terminal that doesn't know the protocol answers only the DA1.
+pub const kitty_query = "\x1b[?u\x1b[c";
+
 pub const Options = struct {
     /// Enter the alternate screen and hide the cursor; otherwise only raw
     /// mode (e.g. for terminal detection).
@@ -43,7 +56,47 @@ pub const Options = struct {
     /// Keep the process's own stdout/stderr off the terminal (POSIX; a
     /// no-op on Windows).
     contain_stdio: Contain = .off,
+    /// Push these kitty keyboard protocol flags (`CSI > flags u`) after
+    /// entering the alternate screen, then query them (`kitty_query`); pop
+    /// them on restore. POSIX terminals.
+    kitty_keyboard_flags: ?u8 = null,
+    /// Turn on focus reporting; off again on restore. POSIX terminals.
+    focus_events: bool = false,
+    /// Windows: deliver console input as VT sequences
+    /// (`ENABLE_VIRTUAL_TERMINAL_INPUT`). Off, `ReadConsoleInputW` returns
+    /// `KEY_EVENT` records with virtual-key codes, key-down and key-up.
+    vt_input: bool = true,
 };
+
+/// The bytes `enter` writes and the cleanup `restore` writes.
+pub const Strings = struct {
+    enter: []const u8,
+    cleanup: []const u8,
+};
+
+/// Longest output of `buildStrings`, with room to spare.
+pub const max_string_len = 128;
+
+/// Builds the enter and cleanup strings for `opts` into the buffers.
+/// Enter: alternate screen, kitty push, focus on, kitty query. Cleanup, in
+/// reverse: focus off, kitty pop, alternate screen left, after a leading
+/// `string_terminator` (none when there is nothing to clean up).
+pub fn buildStrings(opts: Options, enter_out: *[max_string_len]u8, cleanup_out: *[max_string_len]u8) Strings {
+    var e: std.Io.Writer = .fixed(enter_out);
+    var x: std.Io.Writer = .fixed(cleanup_out);
+    // Fixed parts, bounded well below `max_string_len`: the writes can't fail.
+    if (opts.alt_screen) e.writeAll(enter_alt) catch unreachable;
+    if (opts.kitty_keyboard_flags) |f| e.print("\x1b[>{d}u", .{f}) catch unreachable;
+    if (opts.focus_events) e.writeAll(focus_on) catch unreachable;
+    if (opts.kitty_keyboard_flags != null) e.writeAll(kitty_query) catch unreachable;
+
+    const any = opts.alt_screen or opts.kitty_keyboard_flags != null or opts.focus_events;
+    if (any) x.writeAll(string_terminator) catch unreachable;
+    if (opts.focus_events) x.writeAll(focus_off) catch unreachable;
+    if (opts.kitty_keyboard_flags != null) x.writeAll(kitty_pop) catch unreachable;
+    if (opts.alt_screen) x.writeAll(leave_alt) catch unreachable;
+    return .{ .enter = e.buffered(), .cleanup = x.buffered() };
+}
 
 pub const Contain = enum {
     /// fds 1 and 2 stay on the terminal.
@@ -86,6 +139,10 @@ var in_fd: Fd = undefined;
 var out_fd: Fd = undefined;
 var saved: ?Saved = null;
 var cleanup: []const u8 = "";
+/// `buildStrings` output, kept for the life of the process: `cleanup`
+/// points into it, and signal handlers read it.
+var enter_buf: [max_string_len]u8 = undefined;
+var cleanup_buf: [max_string_len]u8 = undefined;
 var handlers_installed = false;
 /// Containment state (POSIX): set by `enter` before `active`, cleared by
 /// `restore`. `saved_err` is a duplicate of the original fd 2; `out_fd` is
@@ -104,17 +161,18 @@ pub const EnterError = error{ NotATerminal, AlreadyActive, WriteFailed, ContainF
 /// previous action. Undo with `restore`.
 pub fn enter(opts: Options) EnterError!void {
     if (active.load(.acquire)) return error.AlreadyActive;
-    if (is_windows) try enterWindows() else try enterPosix();
+    if (is_windows) try enterWindows(opts.vt_input) else try enterPosix();
     if (!is_windows and opts.contain_stdio != .off) {
         containPosix(opts.contain_stdio) catch {
             _ = c.tcsetattr(in_fd, .FLUSH, &saved.?.t);
             return error.ContainFailed;
         };
     }
-    cleanup = if (opts.alt_screen) leave_alt else "";
+    const strings = buildStrings(opts, &enter_buf, &cleanup_buf);
+    cleanup = strings.cleanup;
     active.store(true, .release);
     installHandlers();
-    if (opts.alt_screen and !writeAll(out_fd, enter_alt)) {
+    if (strings.enter.len > 0 and !writeAll(out_fd, strings.enter)) {
         restore();
         return error.WriteFailed;
     }
@@ -189,6 +247,34 @@ pub fn restore() void {
         }
     }
 }
+
+/// `restore` for a watchdog that gave up on a stuck loop (item 06), which
+/// must not hang too. POSIX: writes the cleanup only if the terminal takes
+/// output within 200 ms (a terminal that stopped reading would block the
+/// write forever), restores the terminal modes at once (`TCSANOW`; the
+/// `FLUSH` in `restore` waits for output to drain) and then discards unread
+/// input. Never sets `O_NONBLOCK`, which is shared with the shell's tty
+/// description. Async-signal-safe. Windows: `restore`.
+pub fn restoreBestEffort() void {
+    if (is_windows) return restore();
+    if (!active.swap(false, .acq_rel)) return;
+    var fds = [_]c.pollfd{.{ .fd = out_fd, .events = c.POLL.OUT, .revents = 0 }};
+    // The cleanup is shorter than PIPE_BUF, so a writable fd takes it whole.
+    if (c.poll(&fds, 1, 200) == 1 and fds[0].revents & c.POLL.OUT != 0) _ = writeAll(out_fd, cleanup);
+    if (contained) {
+        contained = false;
+        _ = c.dup2(out_fd, 1);
+        _ = c.dup2(saved_err, 2);
+    }
+    if (saved) |*s| {
+        _ = c.tcsetattr(in_fd, .NOW, &s.t);
+        _ = tcflush(in_fd, TCIFLUSH);
+    }
+}
+
+extern "c" fn tcflush(fd: c.fd_t, queue: c_int) c_int;
+/// Same value on Linux, macOS and the BSDs.
+const TCIFLUSH: c_int = if (builtin.os.tag == .linux) 0 else 1;
 
 /// Writes all of `bytes`, retrying on EINTR and short writes. Returns false
 /// if the descriptor failed. Async-signal-safe.
@@ -386,7 +472,7 @@ extern "kernel32" fn SetConsoleOutputCP(wCodePageID: win.UINT) callconv(.winapi)
 extern "kernel32" fn SetConsoleCtrlHandler(HandlerRoutine: ?CtrlHandler, Add: win.BOOL) callconv(.winapi) win.BOOL;
 extern "kernel32" fn WriteFile(hFile: win.HANDLE, lpBuffer: [*]const u8, nNumberOfBytesToWrite: win.DWORD, lpNumberOfBytesWritten: ?*win.DWORD, lpOverlapped: ?*anyopaque) callconv(.winapi) win.BOOL;
 
-fn enterWindows() EnterError!void {
+fn enterWindows(vt_input: bool) EnterError!void {
     const in = GetStdHandle(STD_INPUT_HANDLE) orelse return error.NotATerminal;
     const out = GetStdHandle(STD_OUTPUT_HANDLE) orelse return error.NotATerminal;
     var in_mode: win.DWORD = undefined;
@@ -396,7 +482,9 @@ fn enterWindows() EnterError!void {
     in_fd = in;
     out_fd = out;
     saved = .{ .in_mode = in_mode, .out_mode = out_mode, .out_cp = GetConsoleOutputCP() };
-    const raw_in = (in_mode & ~(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_WINDOW_INPUT;
+    const cooked = ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT;
+    const vt: win.DWORD = if (vt_input) ENABLE_VIRTUAL_TERMINAL_INPUT else 0;
+    const raw_in = (in_mode & ~(cooked | ENABLE_VIRTUAL_TERMINAL_INPUT)) | vt | ENABLE_WINDOW_INPUT;
     if (SetConsoleMode(in, raw_in) == .FALSE) return error.NotATerminal;
     const vt_out = out_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     if (SetConsoleMode(out, vt_out) == .FALSE) {
@@ -417,14 +505,14 @@ fn onCtrl(_: win.DWORD) callconv(.winapi) win.BOOL {
 
 const testing = std.testing;
 
-/// Points the session at a pipe, as if `enter` had succeeded without a tty
-/// (no termios to restore), and returns the read end.
-fn fakeSession(alt_screen: bool) ![2]c.fd_t {
+/// Points the session at a pipe, as if `enter(opts)` had succeeded without
+/// a tty (no termios to restore), and returns the pipe.
+fn fakeSession(opts: Options) ![2]c.fd_t {
     var fds: [2]c.fd_t = undefined;
     if (c.pipe(&fds) != 0) return error.PipeFailed;
     out_fd = fds[1];
     saved = null;
-    cleanup = if (alt_screen) leave_alt else "";
+    cleanup = buildStrings(opts, &enter_buf, &cleanup_buf).cleanup;
     active.store(true, .release);
     return fds;
 }
@@ -445,9 +533,47 @@ test "cleanup strings" {
     try testing.expect(std.mem.indexOf(u8, leave_alt, "\x1b[0m") != null);
 }
 
+test "enter and cleanup strings for each option combination" {
+    var eb: [max_string_len]u8 = undefined;
+    var cb: [max_string_len]u8 = undefined;
+    const Case = struct { opts: Options, enter: []const u8, cleanup: []const u8 };
+    const cases = [_]Case{
+        .{ .opts = .{ .alt_screen = false }, .enter = "", .cleanup = "" },
+        .{ .opts = .{}, .enter = enter_alt, .cleanup = string_terminator ++ leave_alt },
+        .{
+            .opts = .{ .kitty_keyboard_flags = 15 },
+            .enter = enter_alt ++ "\x1b[>15u" ++ "\x1b[?u\x1b[c",
+            .cleanup = string_terminator ++ "\x1b[<u" ++ leave_alt,
+        },
+        .{
+            .opts = .{ .focus_events = true },
+            .enter = enter_alt ++ "\x1b[?1004h",
+            .cleanup = string_terminator ++ "\x1b[?1004l" ++ leave_alt,
+        },
+        .{
+            .opts = .{ .kitty_keyboard_flags = 15, .focus_events = true },
+            .enter = enter_alt ++ "\x1b[>15u\x1b[?1004h\x1b[?u\x1b[c",
+            .cleanup = string_terminator ++ "\x1b[?1004l\x1b[<u" ++ leave_alt,
+        },
+        .{
+            .opts = .{ .alt_screen = false, .kitty_keyboard_flags = 1 },
+            .enter = "\x1b[>1u\x1b[?u\x1b[c",
+            .cleanup = string_terminator ++ "\x1b[<u",
+        },
+    };
+    for (cases) |k| {
+        const got = buildStrings(k.opts, &eb, &cb);
+        try testing.expectEqualStrings(k.enter, got.enter);
+        try testing.expectEqualStrings(k.cleanup, got.cleanup);
+    }
+    // The longest case stays well inside the buffers.
+    const big = buildStrings(.{ .kitty_keyboard_flags = 255, .focus_events = true }, &eb, &cb);
+    try testing.expect(big.enter.len < max_string_len / 2 and big.cleanup.len < max_string_len / 2);
+}
+
 test "restore writes the cleanup once and is idempotent" {
     if (is_windows) return error.SkipZigTest;
-    const fds = try fakeSession(true);
+    const fds = try fakeSession(.{ .kitty_keyboard_flags = 15, .focus_events = true });
     defer _ = c.close(fds[0]);
     defer _ = c.close(fds[1]);
     try testing.expect(isActive());
@@ -456,12 +582,52 @@ test "restore writes the cleanup once and is idempotent" {
     restore();
     restore();
     var buf: [256]u8 = undefined;
-    try testing.expectEqualStrings(leave_alt, try readAll(fds[0], &buf));
+    const got = try readAll(fds[0], &buf);
+    try testing.expectEqualStrings(string_terminator ++ focus_off ++ kitty_pop ++ leave_alt, got);
+    // The pop and focus-off happen on the alt screen, before leaving it.
+    try testing.expect(std.mem.indexOf(u8, got, kitty_pop).? < std.mem.indexOf(u8, got, "\x1b[?1049l").?);
+    try testing.expect(std.mem.indexOf(u8, got, focus_off).? < std.mem.indexOf(u8, got, "\x1b[?1049l").?);
+}
+
+test "restoreBestEffort gives up on a terminal that stopped reading" {
+    if (is_windows) return error.SkipZigTest;
+    const fds = try fakeSession(.{ .kitty_keyboard_flags = 15 });
+    defer _ = c.close(fds[0]);
+    defer _ = c.close(fds[1]);
+    // Fill the pipe (non-blocking only while filling; the restore sees a
+    // blocking fd, as a real tty would be).
+    const fl = c.fcntl(fds[1], c.F.GETFL);
+    const nonblock: c_int = @bitCast(@as(u32, @bitCast(c.O{ .NONBLOCK = true })));
+    _ = c.fcntl(fds[1], c.F.SETFL, fl | nonblock);
+    const chunk: [4096]u8 = @splat('x');
+    while (c.write(fds[1], &chunk, chunk.len) > 0) {}
+    while (c.write(fds[1], &chunk, 1) > 0) {}
+    _ = c.fcntl(fds[1], c.F.SETFL, fl);
+
+    const t0 = std.Io.Clock.awake.now(testing.io).nanoseconds;
+    restoreBestEffort();
+    const took = std.Io.Clock.awake.now(testing.io).nanoseconds - t0;
+    try testing.expect(!isActive());
+    try testing.expect(took >= 150 * std.time.ns_per_ms);
+    try testing.expect(took < 2 * std.time.ns_per_s);
+    // Idempotent, and a later `restore` does nothing either.
+    restoreBestEffort();
+    restore();
+}
+
+test "restoreBestEffort writes the cleanup when the terminal reads" {
+    if (is_windows) return error.SkipZigTest;
+    const fds = try fakeSession(.{});
+    defer _ = c.close(fds[0]);
+    defer _ = c.close(fds[1]);
+    restoreBestEffort();
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(string_terminator ++ leave_alt, try readAll(fds[0], &buf));
 }
 
 test "raw-only session writes nothing on restore" {
     if (is_windows) return error.SkipZigTest;
-    const fds = try fakeSession(false);
+    const fds = try fakeSession(.{ .alt_screen = false });
     defer _ = c.close(fds[0]);
     defer _ = c.close(fds[1]);
     restore();
@@ -480,7 +646,7 @@ test "a signal restores, then takes its previous action; crashes are caught" {
         _ = c.close(fds[0]);
         out_fd = fds[1];
         saved = null;
-        cleanup = leave_alt;
+        cleanup = buildStrings(.{}, &enter_buf, &cleanup_buf).cleanup;
         active.store(true, .release);
         handlers_installed = false;
         installHandlers();
@@ -497,7 +663,7 @@ test "a signal restores, then takes its previous action; crashes are caught" {
     try testing.expect(posix.W.IFSIGNALED(st));
     try testing.expectEqual(posix.SIG.TERM, posix.W.TERMSIG(st));
     var buf: [256]u8 = undefined;
-    try testing.expectEqualStrings(leave_alt, try readAll(fds[0], &buf));
+    try testing.expectEqualStrings(string_terminator ++ leave_alt, try readAll(fds[0], &buf));
 }
 
 test "restore without a session does nothing" {
@@ -587,7 +753,7 @@ fn runContained(mode: Contain, term_buf: []u8, drained_buf: []u8) !struct { term
         _ = c.close(term[1]);
         saved = null;
         containPosix(mode) catch c._exit(11);
-        cleanup = leave_alt;
+        cleanup = buildStrings(.{}, &enter_buf, &cleanup_buf).cleanup;
         active.store(true, .release);
         if (outFd() == 1) c._exit(12);
         if ((stdioPipe() != null) != (mode == .pipe)) c._exit(13);
@@ -625,7 +791,7 @@ test "contain_stdio pipe: stdio goes to the pipe, never the terminal; restore pu
     var tb: [512]u8 = undefined;
     var db: [512]u8 = undefined;
     const r = try runContained(.pipe, &tb, &db);
-    try testing.expectEqualStrings(leave_alt ++ "after1\nafter2\nafter3\n", r.term);
+    try testing.expectEqualStrings(string_terminator ++ leave_alt ++ "after1\nafter2\nafter3\n", r.term);
     // Unbuffered fd 2 arrives first; C stdio's buffer only on fflush.
     try testing.expectEqualStrings("err-text\nprintf-text\n", r.drained);
 }
@@ -635,6 +801,6 @@ test "contain_stdio discard: stdio is dropped; restore puts it back" {
     var tb: [512]u8 = undefined;
     var db: [512]u8 = undefined;
     const r = try runContained(.discard, &tb, &db);
-    try testing.expectEqualStrings(leave_alt ++ "after1\nafter2\nafter3\n", r.term);
+    try testing.expectEqualStrings(string_terminator ++ leave_alt ++ "after1\nafter2\nafter3\n", r.term);
     try testing.expectEqualStrings("", r.drained);
 }
