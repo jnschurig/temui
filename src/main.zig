@@ -155,6 +155,7 @@ test {
     _ = @import("play/keys.zig");
     _ = @import("play/bindings.zig");
     _ = @import("play/ReleaseGuesser.zig");
+    _ = @import("play/Modes.zig");
     _ = @import("play/stdio.zig");
     _ = @import("play/events.zig");
     _ = @import("play/Engine.zig");
