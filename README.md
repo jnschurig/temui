@@ -25,7 +25,7 @@ It ships as one binary for Linux, macOS and Windows on x86_64 and aarch64, with 
 
 ## Status
 
-Pre-alpha: temui can load a libretro core and run it headless, dumping frames to image files (see [Running a core headless](#running-a-core-headless)); nothing is drawn in the terminal yet.
+Pre-alpha: temui can play a game in the terminal with a core you supply (see [Playing a game](#playing-a-game)). There is no game input, audio or saving yet, and cores aren't downloaded for you. It can also run a core headless and dump frames to image files (see [Running a core headless](#running-a-core-headless)).
 
 - [Architecture decisions](docs/decisions.md): what was chosen and why (D1–D15).
 - [Roadmap](docs/roadmap.md): ordered work items, each with a seed prompt in [`docs/roadmap/`](docs/roadmap/).
@@ -44,9 +44,44 @@ zig build bench                           # renderer benchmarks: zig-out/bin/tem
 
 `temui-bench encode` times each renderer backend without a terminal; `temui-bench live` draws in the current terminal at a paced 60 fps and reports frame rate, frame-interval p99 and CPU (`temui-bench --help`).
 
+## Playing a game
+
+`temui play` loads a core and a ROM and draws the game in the current terminal, using the renderer `temui detect` would pick. Emulation is paced to the core's frame rate by a wall-clock timer; drawing is decoupled from it, so at high speed temui emulates every frame but draws at most `--present-fps` of them.
+
+```sh
+temui play game.sfc --core snes9x_libretro.dylib
+temui play game.sfc --core snes9x_libretro.dylib --speed 4 --present-fps 30 --overlay
+temui play testdata/testcore.rom --core zig-out/lib/temui_test_libretro.dylib --renderer halfblock
+```
+
+| Option | |
+| --- | --- |
+| `--core <path>` | The libretro core to load (required) |
+| `--speed <x>` | Starting speed: a multiple such as `0.25` or `4`, or `max` for unthrottled (default 1) |
+| `--present-fps <f>` | Draw at most `<f>` frames per second (default: the core's fps) |
+| `--overlay` | Start with the stats overlay shown: emulated and presented fps, speed, bytes/s and encode and write time per second |
+| `--paused` | Start paused, showing the first frame |
+| `--duration <s>` | Quit after `<s>` seconds |
+| `--renderer <name>` | `kitty`, `halfblock`, `ascii` or `auto` (default) |
+| `--option`, `--system-dir`, `--save-dir` | As for `run` |
+
+The keys are temporary, until game input and modes arrive (roadmap 06); no key reaches the game yet.
+
+| Key | |
+| --- | --- |
+| `q`, Ctrl-C | Quit |
+| `p` | Pause / resume |
+| `.` | Step one frame (while paused) |
+| `+` or `=`, `-`, `0` | Faster, slower, normal speed (0.25×, 0.5×, 1×, 2×, 4×, 8×, max) |
+| `o` | Show / hide the overlay |
+
+On exit temui prints one summary line (`N frames in S s: emu X fps, presented Y fps`). Resizing the terminal refits the picture. Anything a core prints to stdout or stderr goes to the log (as `core: stdio: …`), never to the screen; snes9x, for example, prints `Map_HiROMMap` while loading a HiROM game. Pacing and decoupling were measured in Ghostty and Rex: see [the verification results](docs/bench/05-play-loop.md).
+
+**Windows:** `play` is built and tested in CI only, not run in a real console. Pacing uses a high-resolution waitable timer and resizes come from console window events. Output that a core writes to stdout or stderr is **not** contained on Windows yet and can corrupt the display.
+
 ## Running a core headless
 
-`temui run --headless` loads a core and a ROM, runs a fixed number of frames as fast as possible, and can write frames out as PPM images. It is a test harness for the libretro host; there is no display or input yet, and you supply the core yourself.
+`temui run --headless` loads a core and a ROM, runs a fixed number of frames as fast as possible, and can write frames out as PPM images. It is a test harness for the libretro host, and you supply the core yourself.
 
 ```sh
 temui run --headless --core snes9x_libretro.dylib --rom game.sfc --frames 600 \
@@ -57,7 +92,7 @@ It prints one summary line (core name and version, frames run, final geometry, p
 
 ## Detecting the terminal
 
-`temui detect` asks the terminal what it supports (kitty graphics and which of its transports work, truecolor, cell size) and prints the renderer temui would use: kitty graphics, half-block, or ASCII. `--json` prints the same as JSON. `--renderer kitty|halfblock|ascii|auto` overrides the choice; for now it is accepted only by `detect`.
+`temui detect` asks the terminal what it supports (kitty graphics and which of its transports work, truecolor, cell size) and prints the renderer temui would use: kitty graphics, half-block, or ASCII. `--json` prints the same as JSON. `--renderer kitty|halfblock|ascii|auto` overrides the choice (`detect` and `play` accept it).
 
 ```sh
 temui detect

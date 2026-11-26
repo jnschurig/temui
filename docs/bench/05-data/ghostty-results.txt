@@ -1,0 +1,11 @@
+speed-4x rc=0 | summary: 1921 frames in 8.0 s: emu 240.10 fps, presented 60.12 fps | final stats: emu 240.0 · pres 60.0 · 4× · 14.6 kB/s · enc 25 ms/s · wr 2.9 ms/s
+speed-max rc=0 | summary: 87176 frames in 8.0 s: emu 10896.70 fps, presented 60.12 fps | final stats: emu 10935.0 · pres 60.0 · max · 14.3 kB/s · enc 4.0 ms/s · wr 0.2 ms/s
+speed-4x-p30 rc=0 | summary: 1921 frames in 8.0 s: emu 240.07 fps, presented 30.12 fps | final stats: emu 240.0 · pres 30.0 · 4× · 7.6 kB/s · enc 11 ms/s · wr 1.4 ms/s
+speed-max-p30 rc=0 | summary: 86149 frames in 8.0 s: emu 10768.41 fps, presented 30.12 fps | final stats: emu 10700.0 · pres 30.0 · max · 32.6 kB/s · enc 1.9 ms/s · wr 0.8 ms/s
+resize-kitty rc=0 | summary: 1200 frames in 20.0 s: emu 60.00 fps, presented 60.00 fps | final stats: emu 60.0 · pres 60.0 · 1× · 12.4 kB/s · enc 22 ms/s · wr 3.0 ms/s
+resize-halfblock rc=0 | summary: 1200 frames in 20.0 s: emu 60.00 fps, presented 60.00 fps | final stats: emu 60.0 · pres 60.0 · 1× · 92.1 kB/s · enc 38 ms/s · wr 5.9 ms/s
+resize-ascii rc=0 | summary: 1200 frames in 20.0 s: emu 60.00 fps, presented 60.00 fps | final stats: emu 60.0 · pres 60.0 · 1× · 149.7 kB/s · enc 48 ms/s · wr 6.7 ms/s
+sig-INT rc=130 tty after: icanon isig echo 
+sig-TERM rc=143 tty after: icanon isig echo 
+pace-300 rc=0 | summary: 18000 frames in 300.0 s: emu 60.00 fps, presented 60.00 fps | final stats: emu 60.0 · pres 60.0 · 1× · 14.8 kB/s · enc 20 ms/s · wr 2.9 ms/s
+pace-300 per-second emu: min 60.0 max 60.9 over 300 samples

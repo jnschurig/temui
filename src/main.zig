@@ -8,6 +8,8 @@ const run = @import("run.zig");
 const host = @import("libretro/host.zig");
 const session = @import("term/session.zig");
 const detect_cmd = @import("detect_cmd.zig");
+const detect = @import("term/detect.zig");
+const play = @import("play.zig");
 
 pub const std_options: std.Options = .{
     // Compile debug logging in; `log` filters by level at runtime.
@@ -74,8 +76,35 @@ pub fn main(init: std.process.Init) !u8 {
         .none, .help => try cli.usage(stdout, log_dir orelse "(unavailable: home directory not set)"),
         .version => try stdout.print("temui {s}\n", .{build_options.version}),
         .detect => {
-            const code = try detect_cmd.run(init.arena.allocator(), io, init.environ_map, opts.renderer, opts.json, stdout);
+            const arena = init.arena.allocator();
+            // Windows sends no queries, so it never polls stdin.
+            const code = if (comptime builtin.os.tag == .windows)
+                try detect_cmd.run(arena, io, init.environ_map, opts.renderer, opts.json, stdout)
+            else
+                detect_cmd.run(arena, io, init.environ_map, opts.renderer, opts.json, stdout) catch |err| switch (err) {
+                    error.InputNotPollable => {
+                        try stderr.print("temui: {s}\n", .{detect.input_not_pollable_msg});
+                        try stderr.flush();
+                        return 1;
+                    },
+                    else => return err,
+                };
             if (code != 0) return code;
+        },
+        .play => {
+            var diag: host.Diagnostic = .{};
+            var summary_buf: [256]u8 = undefined;
+            var summary: std.Io.Writer = .fixed(&summary_buf);
+            // Returns with the terminal restored, on success and on error.
+            play.run(init.gpa, io, init.environ_map, &opts, &summary, &diag) catch |err| {
+                if (err == error.Interrupted) return 130;
+                const msg = if (diag.len > 0) diag.message() else @errorName(err);
+                std.log.err("play failed: {s}", .{msg});
+                try stderr.print("temui: {s}\n", .{msg});
+                try stderr.flush();
+                return 1;
+            };
+            try stdout.writeAll(summary.buffered());
         },
         .run => {
             var diag: host.Diagnostic = .{};
@@ -117,6 +146,16 @@ test {
     _ = @import("render/kitty.zig");
     _ = @import("render/Renderer.zig");
     _ = @import("lib.zig");
+    _ = @import("play/Pacer.zig");
+    _ = @import("play/Stats.zig");
+    _ = @import("play/overlay.zig");
+    _ = @import("play/keys.zig");
+    _ = @import("play/stdio.zig");
+    _ = @import("play/events.zig");
+    _ = @import("play/Engine.zig");
+    _ = @import("play/Viewer.zig");
+    _ = @import("play/smoke_test.zig");
+    _ = play;
 }
 
 test "vendored libretro.h translates" {

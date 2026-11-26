@@ -63,7 +63,7 @@ pub const Event = struct {
     }
 };
 
-const State = enum { ground, esc, csi, string, string_esc };
+const State = enum { ground, esc, csi, ss3, string, string_esc };
 
 pub const Parser = struct {
     state: State = .ground,
@@ -87,6 +87,7 @@ pub const Parser = struct {
                 p.push(b);
                 switch (b) {
                     '[' => p.state = .csi,
+                    'O' => p.state = .ss3, // SS3: one more byte (F1-F4, keypad)
                     'P', '_', ']', 'X', '^' => p.state = .string,
                     0x1b => p.start(b), // stay in .esc
                     else => { // two-byte escape
@@ -108,6 +109,16 @@ pub const Parser = struct {
                     return p.classifyCsi();
                 }
                 return null;
+            },
+            .ss3 => {
+                if (b == 0x1b) { // aborted; restart
+                    p.start(b);
+                    p.state = .esc;
+                    return null;
+                }
+                p.push(b);
+                p.state = .ground;
+                return .{ .kind = .other, .raw = p.buf[0..p.len], .body = p.buf[1..p.len] };
             },
             .string => {
                 if (b == 0x1b) {
@@ -255,12 +266,13 @@ test "every reply type, split at every chunk size" {
 }
 
 test "stray bytes and two-byte escapes surface as events" {
-    try expectEvents("ab\x1b[0nz\x1bM\x1b[?1;2c\r", 1, &.{
+    try expectEvents("ab\x1b[0nz\x1bM\x1bOP\x1b[?1;2c\r", 1, &.{
         .{ .kind = .byte, .body = "a" },
         .{ .kind = .byte, .body = "b" },
         .{ .kind = .dsr_ok, .body = "0" },
         .{ .kind = .byte, .body = "z" },
         .{ .kind = .other, .body = "M" },
+        .{ .kind = .other, .body = "OP" },
         .{ .kind = .da1, .body = "1;2" },
         .{ .kind = .byte, .body = "\r" },
     });

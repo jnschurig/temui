@@ -3,8 +3,9 @@
 const std = @import("std");
 const env = @import("libretro/env.zig");
 const Backend = @import("term/caps.zig").Backend;
+pub const Speed = @import("play/Pacer.zig").Speed;
 
-pub const Command = enum { none, help, version, run, detect };
+pub const Command = enum { none, help, version, run, detect, play };
 
 /// At most this many `--option` flags; parsing stays allocation-free.
 pub const max_core_options = 64;
@@ -13,12 +14,14 @@ pub const Options = struct {
     command: Command = .none,
     verbose: bool = false,
     log_file: ?[]const u8 = null,
-    /// `--renderer`; null is `auto`. Only valid with `detect` until item 05.
+    /// `--renderer`; null is `auto`. Valid with `detect` and `play`.
     renderer: ?Backend = null,
     /// `detect --json`.
     json: bool = false,
     /// Set when `command == .run`.
     run: Run = .{},
+    /// Set when `command == .play`.
+    play: Play = .{},
 };
 
 /// `temui run --headless ...`. `core`, `rom` and `frames` are always set once
@@ -41,6 +44,36 @@ pub const Run = struct {
     }
 };
 
+/// `temui play <rom> --core <path> ...`. `core` and `rom` are always set once
+/// parsing succeeds with `command == .play`.
+pub const Play = struct {
+    core: []const u8 = "",
+    rom: []const u8 = "",
+    speed: Speed = .normal,
+    /// `--present-fps`; null is the core's fps.
+    present_fps: ?f64 = null,
+    overlay: bool = false,
+    paused: bool = false,
+    /// `--duration`, in seconds of wall time.
+    duration_s: ?f64 = null,
+    system_dir: ?[]const u8 = null,
+    save_dir: ?[]const u8 = null,
+    option_buf: [max_core_options]env.Override = undefined,
+    option_len: usize = 0,
+
+    /// The `--option` overrides in command-line order. Points into `self`, so
+    /// take it from a `Play` that stays put.
+    pub fn options(self: *const Play) []const env.Override {
+        return self.option_buf[0..self.option_len];
+    }
+};
+
+/// The range `--speed`, `--present-fps` and `--duration` take. Both ends
+/// keep later conversions to nanoseconds far from overflow: a frame period
+/// at the smallest speed or present rate is still well inside an i96.
+pub const min_number: f64 = 0.001;
+pub const max_number: f64 = 1_000_000;
+
 pub const Error = struct {
     kind: Kind,
     /// The offending argument (or the option's name), as given.
@@ -52,18 +85,26 @@ pub const Error = struct {
         unknown_option,
         missing_value,
         unexpected_argument,
-        /// `arg` is a run option given without the `run` command.
+        /// `arg` is a run option given without `run` (or, for the options
+        /// `run` shares with `play`, without either).
         run_only,
-        /// `arg` is a detect option given without the `detect` command.
+        /// `arg` is a detect option given without `detect` (or, for
+        /// `--renderer`, without `detect` or `play`).
         detect_only,
+        /// `arg` is a play option given without `play`.
+        play_only,
         /// `arg`'s `value` is not one of the allowed choices.
         invalid_choice,
         /// `run` without `--headless`.
         headless_required,
-        /// `arg` is a required run option that is missing.
+        /// `arg` is a required option of the command (`value`) that is missing.
         missing_required,
         /// `arg`'s `value` is not a positive integer.
         invalid_number,
+        /// `--speed`'s `value` is not a positive number or `max`.
+        invalid_speed,
+        /// `arg`'s `value` is not a positive number.
+        invalid_positive,
         /// `--option`'s `value` is not `key=value` with a non-empty key.
         malformed_option,
         too_many_options,
@@ -74,12 +115,13 @@ pub const Error = struct {
             .unknown_option => try w.print("temui: unknown option '{s}'\n", .{e.arg}),
             .missing_value => try w.print("temui: option '{s}' requires a value\n", .{e.arg}),
             .unexpected_argument => try w.print("temui: unexpected argument '{s}'\n", .{e.arg}),
-            .run_only => try w.print("temui: option '{s}' is only valid with 'run'\n", .{e.arg}),
-            .detect_only => try w.print("temui: option '{s}' is only valid with 'detect' for now\n", .{e.arg}),
+            .run_only, .detect_only, .play_only => try w.print("temui: option '{s}' is only valid with {s}\n", .{ e.arg, validWith(e.arg) }),
             .invalid_choice => try w.print("temui: option '{s}' needs one of kitty, halfblock, ascii, auto; got '{s}'\n", .{ e.arg, e.value }),
             .headless_required => try w.writeAll("temui: run requires --headless (interactive run arrives in a later item)\n"),
-            .missing_required => try w.print("temui: run requires '{s}'\n", .{e.arg}),
+            .missing_required => try w.print("temui: {s} requires '{s}'\n", .{ e.value, e.arg }),
             .invalid_number => try w.print("temui: option '{s}' needs a positive integer, got '{s}'\n", .{ e.arg, e.value }),
+            .invalid_speed => try w.print("temui: option '{s}' needs a number from {d} to {d} or 'max', got '{s}'\n", .{ e.arg, min_number, max_number, e.value }),
+            .invalid_positive => try w.print("temui: option '{s}' needs a number from {d} to {d}, got '{s}'\n", .{ e.arg, min_number, max_number, e.value }),
             .malformed_option => try w.print("temui: option '{s}' needs <key>=<value>, got '{s}'\n", .{ e.arg, e.value }),
             .too_many_options => try w.print("temui: too many '{s}' options (at most {d})\n", .{ e.arg, max_core_options }),
         }
@@ -93,7 +135,7 @@ pub const Result = union(enum) {
 };
 
 /// Options that take a value, as `--name value` or `--name=value`.
-const Valued = enum { log_file, renderer, core, rom, frames, dump_ppm, dump_every, option, system_dir, save_dir };
+const Valued = enum { log_file, renderer, core, rom, frames, dump_ppm, dump_every, option, system_dir, save_dir, speed, present_fps, duration };
 
 fn valuedName(v: Valued) []const u8 {
     return switch (v) {
@@ -107,24 +149,81 @@ fn valuedName(v: Valued) []const u8 {
         .option => "--option",
         .system_dir => "--system-dir",
         .save_dir => "--save-dir",
+        .speed => "--speed",
+        .present_fps => "--present-fps",
+        .duration => "--duration",
+    };
+}
+
+/// Which commands a command-specific option is valid with.
+const Where = enum {
+    run,
+    play,
+    run_play,
+    detect,
+    detect_play,
+
+    fn allows(w: Where, c: Command) bool {
+        return switch (w) {
+            .run => c == .run,
+            .play => c == .play,
+            .run_play => c == .run or c == .play,
+            .detect => c == .detect,
+            .detect_play => c == .detect or c == .play,
+        };
+    }
+
+    /// The error for using an option of this kind with the wrong command.
+    fn misplaced(w: Where) Error.Kind {
+        return switch (w) {
+            .run, .run_play => .run_only,
+            .play => .play_only,
+            .detect, .detect_play => .detect_only,
+        };
+    }
+};
+
+/// Null for global options (and unknown names).
+fn whereOf(name: []const u8) ?Where {
+    const table = [_]struct { []const u8, Where }{
+        .{ "--headless", .run },         .{ "--rom", .run },             .{ "--frames", .run },
+        .{ "--dump-ppm", .run },         .{ "--dump-every", .run },      .{ "--core", .run_play },
+        .{ "--option", .run_play },      .{ "--system-dir", .run_play }, .{ "--save-dir", .run_play },
+        .{ "--speed", .play },           .{ "--present-fps", .play },    .{ "--duration", .play },
+        .{ "--overlay", .play },         .{ "--paused", .play },         .{ "--json", .detect },
+        .{ "--renderer", .detect_play },
+    };
+    for (table) |e| if (eql(e[0], name)) return e[1];
+    return null;
+}
+
+/// The commands `name` is valid with, for error messages.
+fn validWith(name: []const u8) []const u8 {
+    return switch (whereOf(name) orelse return "another command") {
+        .run => "'run'",
+        .play => "'play'",
+        .run_play => "'run' or 'play'",
+        .detect => "'detect'",
+        .detect_play => "'detect' or 'play'",
     };
 }
 
 /// Parses arguments, excluding the program name (argv[0]).
-/// `--help` takes precedence over everything else, `--version` over `run`.
+/// `--help` takes precedence over everything else, `--version` over commands.
 pub fn parse(args: []const [:0]const u8) Result {
     var opts: Options = .{};
-    var run_cmd = false;
-    var detect_cmd = false;
-    // The first detect-only option seen, for the error without `detect`.
-    var first_detect_option: ?[]const u8 = null;
+    // The command word (`run`, `detect`, `play`), wherever it appears.
+    var cmd: Command = .none;
     var headless = false;
     var frames_set = false;
-    // The first run option seen, for the error when `run` is missing.
-    var first_run_option: ?[]const u8 = null;
+    // The first option of each kind and its position, so that once the
+    // command is known the earliest misplaced one is reported.
+    const Seen = struct { name: []const u8, pos: usize };
+    var first: std.EnumArray(Where, ?Seen) = .initFill(null);
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg: []const u8 = args[i];
+        const pos = i;
         if (eql(arg, "-h") or eql(arg, "--help")) {
             opts.command = .help;
         } else if (eql(arg, "-V") or eql(arg, "--version")) {
@@ -133,7 +232,12 @@ pub fn parse(args: []const [:0]const u8) Result {
             opts.verbose = true;
         } else if (eql(arg, "--headless")) {
             headless = true;
-            if (first_run_option == null) first_run_option = arg;
+        } else if (eql(arg, "--json")) {
+            opts.json = true;
+        } else if (eql(arg, "--overlay")) {
+            opts.play.overlay = true;
+        } else if (eql(arg, "--paused")) {
+            opts.play.paused = true;
         } else if (matchValued(arg)) |m| {
             const value = m.inline_value orelse blk: {
                 i += 1;
@@ -141,19 +245,16 @@ pub fn parse(args: []const [:0]const u8) Result {
             };
             const name = valuedName(m.which);
             if (value.len == 0) return .{ .err = .{ .kind = .missing_value, .arg = name } };
-            if (m.which != .log_file and m.which != .renderer and first_run_option == null) first_run_option = name;
             switch (m.which) {
                 .log_file => opts.log_file = value,
-                .renderer => {
-                    opts.renderer = if (eql(value, "auto")) null else std.meta.stringToEnum(Backend, value) orelse
-                        return .{ .err = .{ .kind = .invalid_choice, .arg = name, .value = value } };
-                    if (first_detect_option == null) first_detect_option = name;
-                },
+                .renderer => opts.renderer = if (eql(value, "auto")) null else std.meta.stringToEnum(Backend, value) orelse
+                    return .{ .err = .{ .kind = .invalid_choice, .arg = name, .value = value } },
+                // Shared with `play`, which takes them from `opts.run` below.
                 .core => opts.run.core = value,
-                .rom => opts.run.rom = value,
-                .dump_ppm => opts.run.dump_ppm = value,
                 .system_dir => opts.run.system_dir = value,
                 .save_dir => opts.run.save_dir = value,
+                .rom => opts.run.rom = value,
+                .dump_ppm => opts.run.dump_ppm = value,
                 .frames, .dump_every => {
                     // parseInt also accepts '+' and '_' separators; allow digits only.
                     const digits = for (value) |ch| {
@@ -173,39 +274,85 @@ pub fn parse(args: []const [:0]const u8) Result {
                     opts.run.option_buf[opts.run.option_len] = .{ .key = value[0..eq], .value = value[eq + 1 ..] };
                     opts.run.option_len += 1;
                 },
+                .speed => opts.play.speed = if (eql(value, "max")) .max else .{
+                    .x = parsePositive(value) orelse return .{ .err = .{ .kind = .invalid_speed, .arg = name, .value = value } },
+                },
+                .present_fps, .duration => {
+                    const x = parsePositive(value) orelse return .{ .err = .{ .kind = .invalid_positive, .arg = name, .value = value } };
+                    if (m.which == .present_fps) opts.play.present_fps = x else opts.play.duration_s = x;
+                },
             }
-        } else if (eql(arg, "--json")) {
-            opts.json = true;
-            if (first_detect_option == null) first_detect_option = arg;
         } else if (arg.len > 1 and arg[0] == '-') {
             return .{ .err = .{ .kind = .unknown_option, .arg = arg } };
-        } else if (eql(arg, "run") and !run_cmd and !detect_cmd) {
-            run_cmd = true;
-        } else if (eql(arg, "detect") and !run_cmd and !detect_cmd) {
-            detect_cmd = true;
+        } else if (cmd == .none and (eql(arg, "run") or eql(arg, "detect") or eql(arg, "play"))) {
+            cmd = std.meta.stringToEnum(Command, arg).?;
+            continue;
+        } else if (cmd == .play and opts.play.rom.len == 0) {
+            opts.play.rom = arg;
+            continue;
         } else {
             return .{ .err = .{ .kind = .unexpected_argument, .arg = arg } };
+        }
+        // Options only reach here; positionals `continue` above.
+        const name = if (matchValued(arg)) |m| valuedName(m.which) else arg;
+        if (whereOf(name)) |w| {
+            if (first.get(w) == null) first.set(w, .{ .name = name, .pos = pos });
         }
     }
 
     if (opts.command != .none) return .{ .ok = opts };
-    if (!detect_cmd) {
-        if (first_detect_option) |name| return .{ .err = .{ .kind = .detect_only, .arg = name } };
-    } else {
-        if (first_run_option) |name| return .{ .err = .{ .kind = .run_only, .arg = name } };
-        opts.command = .detect;
-        return .{ .ok = opts };
+
+    var misplaced: ?struct { Where, Seen } = null;
+    for (std.enums.values(Where)) |w| {
+        if (w.allows(cmd)) continue;
+        const seen = first.get(w) orelse continue;
+        if (misplaced == null or seen.pos < misplaced.?[1].pos) misplaced = .{ w, seen };
     }
-    if (!run_cmd) {
-        if (first_run_option) |name| return .{ .err = .{ .kind = .run_only, .arg = name } };
-        return .{ .ok = opts };
+    if (misplaced) |m| return .{ .err = .{ .kind = m[0].misplaced(), .arg = m[1].name } };
+
+    switch (cmd) {
+        .none => {},
+        .detect => opts.command = .detect,
+        .run => {
+            if (!headless) return .{ .err = .{ .kind = .headless_required, .arg = "run" } };
+            if (opts.run.core.len == 0) return missingRequired("--core", "run");
+            if (opts.run.rom.len == 0) return missingRequired("--rom", "run");
+            if (!frames_set) return missingRequired("--frames", "run");
+            opts.command = .run;
+        },
+        .play => {
+            if (opts.play.rom.len == 0) return missingRequired("<rom>", "play");
+            if (opts.run.core.len == 0) return missingRequired("--core", "play");
+            const p = &opts.play;
+            p.core = opts.run.core;
+            p.system_dir = opts.run.system_dir;
+            p.save_dir = opts.run.save_dir;
+            p.option_len = opts.run.option_len;
+            @memcpy(p.option_buf[0..p.option_len], opts.run.options());
+            opts.run = .{};
+            opts.command = .play;
+        },
+        .help, .version => unreachable,
     }
-    if (!headless) return .{ .err = .{ .kind = .headless_required, .arg = "run" } };
-    if (opts.run.core.len == 0) return .{ .err = .{ .kind = .missing_required, .arg = "--core" } };
-    if (opts.run.rom.len == 0) return .{ .err = .{ .kind = .missing_required, .arg = "--rom" } };
-    if (!frames_set) return .{ .err = .{ .kind = .missing_required, .arg = "--frames" } };
-    opts.command = .run;
     return .{ .ok = opts };
+}
+
+fn missingRequired(arg: []const u8, command: []const u8) Result {
+    return .{ .err = .{ .kind = .missing_required, .arg = arg, .value = command } };
+}
+
+/// A decimal number from `min_number` to `max_number`: digits with at most
+/// one '.', so no signs, exponents, `inf` or `nan`.
+fn parsePositive(value: []const u8) ?f64 {
+    var dots: usize = 0;
+    var digits: usize = 0;
+    for (value) |ch| {
+        if (ch == '.') dots += 1 else if (std.ascii.isDigit(ch)) digits += 1 else return null;
+    }
+    if (dots > 1 or digits == 0) return null;
+    const x = std.fmt.parseFloat(f64, value) catch return null;
+    if (!(x >= min_number) or x > max_number) return null;
+    return x;
 }
 
 const Match = struct { which: Valued, inline_value: ?[]const u8 };
@@ -227,6 +374,7 @@ pub fn usage(w: *std.Io.Writer, log_dir: []const u8) std.Io.Writer.Error!void {
         \\temui — a terminal libretro frontend
         \\
         \\Usage: temui [options]
+        \\       temui play <rom> --core <path> [play options]
         \\       temui run --headless --core <path> --rom <path> --frames <N> [run options]
         \\       temui detect [--json] [--renderer <name>]
         \\
@@ -235,7 +383,22 @@ pub fn usage(w: *std.Io.Writer, log_dir: []const u8) std.Io.Writer.Error!void {
         \\  -V, --version           Show the version and exit
         \\  -v, --verbose           Log at debug level
         \\      --log-file <path>   Log to <path> instead of the log directory
-        \\      --renderer <name>   kitty, halfblock, ascii or auto (default); 'detect' only for now
+        \\      --renderer <name>   kitty, halfblock, ascii or auto (default); 'play' and 'detect'
+        \\
+        \\Play options (run a game in this terminal):
+        \\      --core <path>       The libretro core to load
+        \\      --speed <x>         Starting speed: a multiple such as 0.25 or 4, or max (default 1)
+        \\      --present-fps <f>   Draw at most <f> frames per second (default: the core's fps)
+        \\      --overlay           Start with the stats overlay shown
+        \\      --paused            Start paused, showing the first frame
+        \\      --duration <s>      Quit after <s> seconds
+        \\      --option, --system-dir, --save-dir   As for 'run'
+        \\
+        \\Play keys (temporary, until modes arrive):
+        \\  q, Ctrl-C   Quit                 p   Pause / resume
+        \\  .           Step one frame       o   Show / hide the overlay
+        \\  + or =      Faster               -   Slower
+        \\  0           Normal speed
         \\
         \\Detect options (show what temui would use in this terminal):
         \\      --json              Print the result as JSON
@@ -469,4 +632,141 @@ test "detect: usage errors" {
     try expectErr(&.{ "detect", "run" }, .unexpected_argument, "run");
     try expectErr(&.{ "run", "detect" }, .unexpected_argument, "detect");
     try expectErr(&.{ "detect", "detect" }, .unexpected_argument, "detect");
+}
+
+fn expectPlay(args: []const [:0]const u8) !Options {
+    const r = parse(args);
+    if (r == .err) {
+        std.debug.print("unexpected error: {t} {s} {s}\n", .{ r.err.kind, r.err.arg, r.err.value });
+        return error.TestUnexpectedResult;
+    }
+    try testing.expectEqual(Command.play, r.ok.command);
+    return r.ok;
+}
+
+test "play: required arguments and defaults" {
+    const o = try expectPlay(&.{ "play", "g.sfc", "--core", "c.so" });
+    const p = o.play;
+    try testing.expectEqualStrings("c.so", p.core);
+    try testing.expectEqualStrings("g.sfc", p.rom);
+    try testing.expect(p.speed.eql(.normal));
+    try testing.expectEqual(null, p.present_fps);
+    try testing.expect(!p.overlay);
+    try testing.expect(!p.paused);
+    try testing.expectEqual(null, p.duration_s);
+    try testing.expectEqual(null, p.system_dir);
+    try testing.expectEqual(null, p.save_dir);
+    try testing.expectEqual(0, p.options().len);
+    try testing.expectEqual(null, o.renderer);
+    // The ROM may come anywhere after `play`.
+    const o2 = try expectPlay(&.{ "--core=c.so", "play", "--overlay", "g.sfc" });
+    try testing.expectEqualStrings("g.sfc", o2.play.rom);
+}
+
+test "play: every option, both value forms" {
+    const o = try expectPlay(&.{
+        "play",         "--core",           "c.dylib",    "--speed",
+        "0.25",         "--present-fps=30", "--overlay",  "--paused",
+        "--duration",   "1.5",              "--option",   "a=1",
+        "--option=b=2", "--system-dir=sys", "--save-dir", "saves",
+        "--renderer",   "halfblock",        "-v",         "g.gb",
+    });
+    const p = o.play;
+    try testing.expectEqualStrings("c.dylib", p.core);
+    try testing.expectEqualStrings("g.gb", p.rom);
+    try testing.expect(p.speed.eql(.{ .x = 0.25 }));
+    try testing.expectEqual(30, p.present_fps.?);
+    try testing.expect(p.overlay);
+    try testing.expect(p.paused);
+    try testing.expectEqual(1.5, p.duration_s.?);
+    try testing.expectEqualStrings("sys", p.system_dir.?);
+    try testing.expectEqualStrings("saves", p.save_dir.?);
+    try testing.expectEqual(2, p.options().len);
+    try testing.expectEqualStrings("a", p.options()[0].key);
+    try testing.expectEqualStrings("2", p.options()[1].value);
+    try testing.expectEqual(@as(?Backend, .halfblock), o.renderer);
+    try testing.expect(o.verbose);
+
+    const o2 = try expectPlay(&.{ "play", "g", "--core", "c", "--speed=max", "--present-fps", "0.2", "--duration=300", "--renderer=auto" });
+    try testing.expect(o2.play.speed.eql(.max));
+    try testing.expectEqual(0.2, o2.play.present_fps.?);
+    try testing.expectEqual(300, o2.play.duration_s.?);
+    try testing.expectEqual(null, o2.renderer);
+    try testing.expect((try expectPlay(&.{ "play", "g", "--core", "c", "--speed", "4" })).play.speed.eql(.{ .x = 4 }));
+}
+
+test "play: number validation" {
+    for ([_][:0]const u8{ "--speed", "--present-fps", "--duration" }) |opt| {
+        for ([_][:0]const u8{ "0", "0.0", "-1", "+1", "abc", "1e3", "inf", "nan", ".", "1.2.3", " 1", "1_0", "1000001", "0.0009", "0.000000000000000000000001" }) |bad| {
+            const r = parse(&.{ "play", "g", "--core", "c", opt, bad });
+            try testing.expect(r == .err);
+            const want: Error.Kind = if (eql(opt, "--speed")) .invalid_speed else .invalid_positive;
+            try testing.expectEqual(want, r.err.kind);
+            try testing.expectEqualStrings(opt, r.err.arg);
+            try testing.expectEqualStrings(bad, r.err.value);
+        }
+        for ([_][:0]const u8{ ".5", "5.", "1000000", "0.001" }) |good| {
+            _ = try expectPlay(&.{ "play", "g", "--core", "c", opt, good });
+        }
+    }
+    try expectErr(&.{ "play", "g", "--core", "c", "--present-fps", "max" }, .invalid_positive, "--present-fps");
+    try expectErr(&.{ "play", "g", "--core", "c", "--speed" }, .missing_value, "--speed");
+}
+
+test "play: usage errors" {
+    try expectErr(&.{ "play", "--core", "c" }, .missing_required, "<rom>");
+    try expectErr(&.{ "play", "g" }, .missing_required, "--core");
+    try expectErr(&.{"play"}, .missing_required, "<rom>");
+    try expectErr(&.{ "play", "g", "h", "--core", "c" }, .unexpected_argument, "h");
+    try expectErr(&.{ "play", "g", "--core", "c", "--rom", "x" }, .run_only, "--rom");
+    try expectErr(&.{ "play", "g", "--core", "c", "--headless" }, .run_only, "--headless");
+    try expectErr(&.{ "play", "g", "--core", "c", "--frames", "1" }, .run_only, "--frames");
+    try expectErr(&.{ "play", "g", "--core", "c", "--json" }, .detect_only, "--json");
+    try expectErr(&.{ "run", "play" }, .unexpected_argument, "play");
+    try expectErr(&.{ "detect", "play" }, .unexpected_argument, "play");
+    // Play options without `play`.
+    for ([_][:0]const u8{ "--overlay", "--paused" }) |flag| {
+        try expectErr(&.{flag}, .play_only, flag);
+        try expectErr(&.{ "detect", flag }, .play_only, flag);
+    }
+    try expectErr(&.{ "--speed", "2" }, .play_only, "--speed");
+    try expectErr(&.{ "run", "--headless", "--core", "c", "--rom", "g", "--frames", "1", "--duration=5" }, .play_only, "--duration");
+    // The earliest misplaced option is the one reported.
+    try expectErr(&.{ "detect", "--paused", "--core", "c" }, .play_only, "--paused");
+    try expectErr(&.{ "detect", "--core", "c", "--paused" }, .run_only, "--core");
+    try expectOk(&.{ "play", "--help" }, .{ .command = .help });
+    try expectOk(&.{ "play", "g", "--version" }, .{ .command = .version });
+}
+
+test "play: error messages" {
+    const cases = [_]struct { Error, []const u8 }{
+        .{ .{ .kind = .missing_required, .arg = "<rom>", .value = "play" }, "temui: play requires '<rom>'\n" },
+        .{ .{ .kind = .missing_required, .arg = "--core", .value = "run" }, "temui: run requires '--core'\n" },
+        .{ .{ .kind = .play_only, .arg = "--overlay" }, "temui: option '--overlay' is only valid with 'play'\n" },
+        .{ .{ .kind = .run_only, .arg = "--core" }, "temui: option '--core' is only valid with 'run' or 'play'\n" },
+        .{ .{ .kind = .run_only, .arg = "--frames" }, "temui: option '--frames' is only valid with 'run'\n" },
+        .{ .{ .kind = .detect_only, .arg = "--renderer" }, "temui: option '--renderer' is only valid with 'detect' or 'play'\n" },
+        .{ .{ .kind = .detect_only, .arg = "--json" }, "temui: option '--json' is only valid with 'detect'\n" },
+        .{ .{ .kind = .invalid_speed, .arg = "--speed", .value = "0" }, "temui: option '--speed' needs a number from 0.001 to 1000000 or 'max', got '0'\n" },
+        .{ .{ .kind = .invalid_positive, .arg = "--duration", .value = "x" }, "temui: option '--duration' needs a number from 0.001 to 1000000, got 'x'\n" },
+    };
+    for (cases) |c| {
+        var buf: [256]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        try c[0].write(&w);
+        const out = w.buffered();
+        try testing.expectEqualStrings(c[1], out[0 .. std.mem.indexOfScalar(u8, out, '\n').? + 1]);
+    }
+}
+
+test "usage documents play" {
+    var buf: [8192]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try usage(&w, "/logs");
+    for ([_][]const u8{ "temui play <rom> --core <path>", "--speed <x>", "--present-fps <f>", "--overlay", "--paused", "--duration <s>", "Play keys (temporary" }) |want| {
+        if (std.mem.indexOf(u8, w.buffered(), want) == null) {
+            std.debug.print("usage lacks '{s}'\n", .{want});
+            return error.TestUnexpectedResult;
+        }
+    }
 }

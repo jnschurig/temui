@@ -247,6 +247,8 @@ pub fn run(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, env: *c
     defer session.restore();
 
     const cs = try temui.term.detect.run(arena, io, env, .{});
+    // Includes the kitty z-index (item 05), which the 02/04 baselines were
+    // measured without: see docs/bench/04-renderers.md.
     var choice = caps.select(cs, cfg.renderer, .posix);
     if (cfg.transport) |t| {
         // Inline zlib stays last: the kitty backend needs it as a fallback.

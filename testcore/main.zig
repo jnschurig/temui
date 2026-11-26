@@ -7,6 +7,9 @@
 //! - Audio: a 440 Hz sine, 48 kHz stereo, 800 frames per video frame.
 //! - Input: one indicator box per RetroPad button on port 0.
 //! - SRAM: 8 KiB; the frame counter (u32 LE) at 0, the input bitmask (u16 LE) at 4.
+//! - Stdout: with the core option `temui_test_stdout_marker=on` (default off),
+//!   prints `stdout_marker` with C stdio on load, as real cores do (D13). Off
+//!   by default: in-process tests share the test runner's stdout, its IPC.
 //! - Content: required; its CRC32 selects the colour-bar rotation and is shown
 //!   as a 32-bit strip.
 //!
@@ -24,6 +27,10 @@ pub const sample_rate = 48000;
 pub const audio_frames = sample_rate / fps; // 800
 pub const sram_size = 8192;
 pub const option_key = "temui_test_pixel_format";
+pub const marker_key = "temui_test_stdout_marker";
+pub const stdout_marker = "temui test core: stdout marker";
+
+extern "c" fn puts(s: [*:0]const u8) c_int;
 
 const tone_hz = 440;
 /// Phase step per sample in 2^32 units per cycle.
@@ -98,9 +105,10 @@ export fn retro_set_environment(f: c.retro_environment_t) void {
     cb.log = null;
     const vars = [_]c.struct_retro_variable{
         .{ .key = option_key, .value = "Pixel format; xrgb8888|rgb565|0rgb1555" },
+        .{ .key = marker_key, .value = "Print a marker on stdout at load; off|on" },
         .{ .key = null, .value = null },
     };
-    _ = env(c.RETRO_ENVIRONMENT_SET_VARIABLES, @constCast(@ptrCast(&vars)));
+    _ = env(c.RETRO_ENVIRONMENT_SET_VARIABLES, @ptrCast(@constCast(&vars)));
     var log_cb: c.struct_retro_log_callback = .{};
     if (env(c.RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &log_cb)) cb.log = log_cb.log;
 }
@@ -197,6 +205,10 @@ export fn retro_load_game(info: ?*const c.struct_retro_game_info) bool {
                 return false;
             }
         },
+    }
+    var m: c.struct_retro_variable = .{ .key = marker_key, .value = null };
+    if (env(c.RETRO_ENVIRONMENT_GET_VARIABLE, &m) and m.value != null and std.mem.eql(u8, std.mem.span(m.value), "on")) {
+        _ = puts(stdout_marker);
     }
     game.loaded = true;
     log(c.RETRO_LOG_INFO, "temui test core: loaded %u bytes, crc32 %08x, format %s\n", .{

@@ -30,9 +30,9 @@ pub const HalfBlock = struct {
     pixels: []u8 = &.{},
     cur: []Cell = &.{},
     prev: []Cell = &.{},
-    /// The rect and fitted box of the previous `present`; null forces a full
-    /// redraw.
-    last: ?struct { rect: Rect, box: Rect } = null,
+    /// The rect, fitted box and occluded cells of the previous `present`;
+    /// null forces a full redraw.
+    last: ?struct { rect: Rect, box: Rect, occlude: ?Rect } = null,
     pen: sgr.Pen = .{},
 
     pub fn init(gpa: std.mem.Allocator, cell_px: CellPx) HalfBlock {
@@ -58,8 +58,11 @@ pub const HalfBlock = struct {
     }
 
     /// Draws `frame` into `rect`, letterboxed to `aspect` (default: the
-    /// frame's own width / height). An empty frame or rect draws nothing.
-    pub fn present(hb: *HalfBlock, w: *std.Io.Writer, frame: Frame, rect: Rect, aspect: ?f32) !void {
+    /// frame's own width / height). Cells of the box inside `occlude` are
+    /// left alone (an overlay is drawn there); cells it covered last time and
+    /// no longer does are redrawn even if unchanged. An empty frame or rect
+    /// draws nothing.
+    pub fn present(hb: *HalfBlock, w: *std.Io.Writer, frame: Frame, rect: Rect, aspect: ?f32, occlude: ?Rect) !void {
         if (frame.isEmpty() or rect.isEmpty()) return;
         const box = layout.fit(rect, hb.cell_px, aspect orelse frame.aspect());
         if (box.isEmpty()) return;
@@ -92,11 +95,12 @@ pub const HalfBlock = struct {
         for (0..box.rows) |yi| {
             const y: u32 = @intCast(yi);
             const row = hb.cur[yi * box.cols ..][0..box.cols];
-            if (full) {
-                try hb.emitRun(w, box, y, row, 0, box.cols);
-                continue;
-            }
-            var runs: sgr.ChangedRuns(Cell) = .{ .new = row, .old = hb.prev[yi * box.cols ..][0..box.cols] };
+            var runs: sgr.ChangedRuns(Cell) = .{
+                .new = row,
+                .old = hb.prev[yi * box.cols ..][0..box.cols],
+                .force = if (full) .{ 0, box.cols } else sgr.rowSpan(last.?.occlude, box, box.row + y),
+                .skip = sgr.rowSpan(occlude, box, box.row + y),
+            };
             while (runs.next()) |r| {
                 try hb.emitRun(w, box, y, row, r[0], r[1]);
                 wrote = true;
@@ -104,7 +108,7 @@ pub const HalfBlock = struct {
         }
         if (wrote) try w.writeAll(sgr.reset);
         std.mem.swap([]Cell, &hb.cur, &hb.prev);
-        hb.last = .{ .rect = rect, .box = box };
+        hb.last = .{ .rect = rect, .box = box, .occlude = occlude };
     }
 
     fn resize(hb: *HalfBlock, n: usize, box: Rect) !void {
@@ -154,7 +158,7 @@ const golden = @import("golden.zig");
 fn render(hb: *HalfBlock, frame: Frame, rect: Rect) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     errdefer aw.deinit();
-    try hb.present(&aw.writer, frame, rect, null);
+    try hb.present(&aw.writer, frame, rect, null, null);
     return aw.toOwnedSlice();
 }
 

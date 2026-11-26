@@ -30,6 +30,11 @@ pub const Options = struct {
 pub const PresentOptions = struct {
     /// Display aspect (width / height); default: the frame's own.
     aspect: ?f32 = null,
+    /// Cells an overlay occupies. Half-block and ASCII never draw inside it,
+    /// and redraw what it uncovers on the next `present` once it shrinks or
+    /// goes (even if the pixels there are unchanged). Kitty ignores it: its
+    /// image sits below cells with a background (`Choice.kitty_z`).
+    occlude: ?Rect = null,
 };
 
 impl: union(Backend) {
@@ -39,10 +44,12 @@ impl: union(Backend) {
 },
 
 /// Builds the backend `choice` names, with its cell size, kitty transport
-/// order and ASCII colour mode.
+/// order and z-index, and ASCII colour mode.
 pub fn init(gpa: std.mem.Allocator, io: std.Io, choice: caps.Choice, opts: Options) !Renderer {
+    var kitty_opts = opts.kitty;
+    kitty_opts.z = choice.kitty_z;
     return .{ .impl = switch (choice.backend) {
-        .kitty => .{ .kitty = try .init(gpa, io, choice.cell_px, choice.transports, opts.kitty) },
+        .kitty => .{ .kitty = try .init(gpa, io, choice.cell_px, choice.transports, kitty_opts) },
         .halfblock => .{ .halfblock = .init(gpa, choice.cell_px) },
         .ascii => .{ .ascii = .init(gpa, choice.cell_px, choice.ascii_color) },
     } };
@@ -63,8 +70,19 @@ pub fn backend(r: *const Renderer) Backend {
 /// Draws `frame` into `rect`. An empty frame or rect draws nothing.
 pub fn present(r: *Renderer, w: *std.Io.Writer, frame: Frame, rect: Rect, opts: PresentOptions) !void {
     switch (r.impl) {
-        inline else => |*b| try b.present(w, frame, rect, opts.aspect),
+        .kitty => |*k| try k.present(w, frame, rect, opts.aspect),
+        inline .halfblock, .ascii => |*b| try b.present(w, frame, rect, opts.aspect, opts.occlude),
     }
+}
+
+/// The box `present` would draw `frame` into: `rect` letterboxed to `aspect`
+/// (default: the frame's own). Empty when nothing would be drawn.
+pub fn fitted(r: *const Renderer, frame: Frame, rect: Rect, aspect: ?f32) Rect {
+    if (frame.isEmpty() or rect.isEmpty()) return .{ .col = rect.col, .row = rect.row };
+    const cell = switch (r.impl) {
+        inline else => |*b| b.cell_px,
+    };
+    return layout.fit(rect, cell, aspect orelse frame.aspect());
 }
 
 /// The terminal's cell size changed (or the screen was otherwise disturbed):
@@ -266,5 +284,141 @@ test "empty frame or rect writes nothing through the interface" {
         const no_rect = try draw(&r, .{ .width = 1, .height = 1, .rgb = &px }, .{ .cols = 0, .rows = 5 });
         defer gpa.free(no_rect);
         try testing.expectEqualStrings("", no_rect);
+    }
+}
+
+/// The cells of an 80×24 screen that `out` printed a glyph into (CUP moves,
+/// each glyph advances one column; other escapes, including ECH, print
+/// nothing).
+fn glyphCells(out: []const u8) ![24][80]bool {
+    var cells: [24][80]bool = @splat(@splat(false));
+    var row: u32 = 1;
+    var col: u32 = 1;
+    var i: usize = 0;
+    while (i < out.len) {
+        if (out[i] == 0x1b) {
+            const start = i + 2;
+            i = start;
+            while (out[i] < 0x40 or out[i] > 0x7e) i += 1;
+            if (out[i] == 'H') {
+                const params = out[start..i];
+                const semi = std.mem.indexOfScalar(u8, params, ';') orelse return error.BadCup;
+                row = try std.fmt.parseInt(u32, params[0..semi], 10);
+                col = try std.fmt.parseInt(u32, params[semi + 1 ..], 10);
+            }
+            i += 1;
+            continue;
+        }
+        i += try std.unicode.utf8ByteSequenceLength(out[i]);
+        cells[row - 1][col - 1] = true;
+        col += 1;
+    }
+    return cells;
+}
+
+fn countCells(cells: [24][80]bool, in: ?Rect) usize {
+    var n: usize = 0;
+    for (cells, 1..) |line, r| for (line, 1..) |set, c| {
+        if (!set) continue;
+        if (in) |o| if (r < o.row or r >= o.row + o.rows or c < o.col or c >= o.col + o.cols) continue;
+        n += 1;
+    };
+    return n;
+}
+
+fn drawWith(r: *Renderer, frame: Frame, rect: Rect, occlude: ?Rect) ![24][80]bool {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try r.present(&aw.writer, frame, rect, .{ .occlude = occlude });
+    return glyphCells(aw.written());
+}
+
+test "fitted is the box present draws into" {
+    const gpa = testing.allocator;
+    const frame = try golden.loadFrame60(gpa);
+    defer gpa.free(frame.rgb);
+    for ([_]Backend{ .kitty, .halfblock, .ascii }) |b| {
+        var r: Renderer = try .init(gpa, testing.io, testChoice(b), .{});
+        defer r.deinit();
+        try testing.expectEqual(Rect{ .col = 13, .row = 1, .cols = 55, .rows = 24 }, r.fitted(frame, golden.rect, null));
+        try testing.expectEqual(Rect{ .col = 9, .row = 1, .cols = 64, .rows = 24 }, r.fitted(frame, golden.rect, 4.0 / 3.0));
+        try testing.expect(r.fitted(.{ .width = 0, .height = 0, .rgb = &.{} }, golden.rect, null).isEmpty());
+        try testing.expect(r.fitted(frame, .{ .cols = 0, .rows = 3 }, null).isEmpty());
+    }
+}
+
+test "occlusion: covered cells are never drawn; uncovered ones are redrawn" {
+    const gpa = testing.allocator;
+    const frame = try golden.loadFrame60(gpa);
+    defer gpa.free(frame.rgb);
+    const inverted = try gpa.dupe(u8, frame.rgb);
+    defer gpa.free(inverted);
+    for (inverted) |*v| v.* ^= 0xff;
+    const inv: Frame = .{ .width = frame.width, .height = frame.height, .rgb = inverted };
+    // The overlay line: 20 cells at the box's top-left (box is 55×24 at col 13).
+    const wide: Rect = .{ .col = 13, .row = 1, .cols = 20, .rows = 1 };
+    const narrow: Rect = .{ .col = 13, .row = 1, .cols = 8, .rows = 1 };
+    const box_cells = 55 * 24;
+    for ([_]Backend{ .halfblock, .ascii }) |b| {
+        var r: Renderer = try .init(gpa, testing.io, testChoice(b), .{});
+        defer r.deinit();
+
+        // First (full) present: everything but the overlay's cells.
+        var cells = try drawWith(&r, frame, golden.rect, wide);
+        try testing.expectEqual(box_cells - 20, countCells(cells, null));
+        try testing.expectEqual(0, countCells(cells, wide));
+
+        // Same frame and overlay: nothing.
+        cells = try drawWith(&r, frame, golden.rect, wide);
+        try testing.expectEqual(0, countCells(cells, null));
+
+        // Every pixel changes under the overlay: still not drawn there.
+        cells = try drawWith(&r, inv, golden.rect, wide);
+        try testing.expectEqual(box_cells - 20, countCells(cells, null));
+        try testing.expectEqual(0, countCells(cells, wide));
+
+        // The overlay shrinks with the pixels unchanged: exactly the 12
+        // uncovered cells are redrawn.
+        cells = try drawWith(&r, inv, golden.rect, narrow);
+        try testing.expectEqual(12, countCells(cells, null));
+        try testing.expectEqual(12, countCells(cells, .{ .col = 21, .row = 1, .cols = 12, .rows = 1 }));
+
+        // The overlay goes away: its 8 cells come back, nothing else.
+        cells = try drawWith(&r, inv, golden.rect, null);
+        try testing.expectEqual(8, countCells(cells, null));
+        try testing.expectEqual(8, countCells(cells, narrow));
+        cells = try drawWith(&r, inv, golden.rect, null);
+        try testing.expectEqual(0, countCells(cells, null));
+    }
+}
+
+test "occlusion outside the box, or overlapping its edge, is clipped" {
+    const gpa = testing.allocator;
+    const frame = try golden.loadFrame60(gpa);
+    defer gpa.free(frame.rgb);
+    for ([_]Backend{ .halfblock, .ascii }) |b| {
+        var r: Renderer = try .init(gpa, testing.io, testChoice(b), .{});
+        defer r.deinit();
+        // Cols 1..20 of row 3: only box cols 13..20 (8 cells) are inside.
+        const cells = try drawWith(&r, frame, golden.rect, .{ .col = 1, .row = 3, .cols = 20, .rows = 1 });
+        try testing.expectEqual(55 * 24 - 8, countCells(cells, null));
+    }
+}
+
+test "kitty: placements carry the choice's z-index" {
+    const gpa = testing.allocator;
+    const px = [_]u8{ 1, 2, 3 };
+    const frame: Frame = .{ .width = 1, .height = 1, .rgb = &px };
+    for ([_]i32{ caps.default_overlay_z, -1, 0 }) |z| {
+        var choice = testChoice(.kitty);
+        choice.kitty_z = z;
+        var r: Renderer = try .init(gpa, testing.io, choice, .{});
+        defer r.deinit();
+        const out = try draw(&r, frame, .{ .cols = 2, .rows = 1 });
+        defer gpa.free(out);
+        var buf: [32]u8 = undefined;
+        const key = try std.fmt.bufPrint(&buf, ",z={d},", .{z});
+        try testing.expectEqual(z != 0, std.mem.indexOf(u8, out, key) != null);
+        try testing.expectEqual(z != 0, std.mem.indexOf(u8, out, ",z=") != null);
     }
 }
