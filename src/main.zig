@@ -135,6 +135,9 @@ test {
     _ = @import("ppm.zig");
     _ = run;
     _ = @import("term/replies.zig");
+    _ = @import("term/keys.zig");
+    _ = @import("term/key_decoder.zig");
+    _ = @import("term/console_keys.zig");
     _ = @import("term/caps.zig");
     _ = session;
     _ = @import("term/detect.zig");
@@ -150,6 +153,8 @@ test {
     _ = @import("play/Stats.zig");
     _ = @import("play/overlay.zig");
     _ = @import("play/keys.zig");
+    _ = @import("play/bindings.zig");
+    _ = @import("play/ReleaseGuesser.zig");
     _ = @import("play/stdio.zig");
     _ = @import("play/events.zig");
     _ = @import("play/Engine.zig");
