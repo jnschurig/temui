@@ -1,6 +1,7 @@
 //! Test-only: a tiny terminal model that replays the bytes the viewer and
 //! boxes write. It knows CUP, SGR (only whether the background is
 //! non-default), ECH and `CSI 2 J`, and puts one code point per cell.
+//! Other sequences (private modes, kitty graphics) are skipped.
 
 const std = @import("std");
 const TestScreen = @This();
@@ -41,7 +42,14 @@ pub fn feed(s: *TestScreen, bytes: []const u8) !void {
     var i: usize = 0;
     while (i < bytes.len) {
         if (bytes[i] == 0x1b) {
-            if (i + 1 >= bytes.len or bytes[i + 1] != '[') return error.UnknownEscape;
+            if (i + 1 >= bytes.len) return error.TruncatedEscape;
+            if (bytes[i + 1] == '_') {
+                // APC (kitty graphics), up to ST.
+                const st = std.mem.indexOfPos(u8, bytes, i + 2, "\x1b\\") orelse return error.TruncatedEscape;
+                i = st + 2;
+                continue;
+            }
+            if (bytes[i + 1] != '[') return error.UnknownEscape;
             var j = i + 2;
             while (j < bytes.len and (bytes[j] < 0x40 or bytes[j] > 0x7e)) j += 1;
             if (j >= bytes.len) return error.TruncatedEscape;
@@ -57,6 +65,7 @@ pub fn feed(s: *TestScreen, bytes: []const u8) !void {
 }
 
 fn csi(s: *TestScreen, params: []const u8, final: u8) !void {
+    if (params.len > 0 and (params[0] < '0' or params[0] > ';')) return; // private
     var nums: [16]u32 = undefined;
     var n: usize = 0;
     var it = std.mem.splitAny(u8, params, ";:");

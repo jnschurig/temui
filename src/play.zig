@@ -2,8 +2,8 @@
 //!
 //! One thread, one loop (D8). Each iteration runs the frames the engine has
 //! due, drains the core's contained stdio into the log, lets the viewer
-//! present and redraw the overlay, then waits for the earliest of the next
-//! frame, the next present, the overlay refresh, the per-second stats log,
+//! present and redraw the boxes and status line, then waits for the earliest of the next
+//! frame, the next present, the status-line check, the per-second stats log,
 //! the `--duration` end, a key or a resize.
 //!
 //! Startup order: detection (raw mode only while it queries), renderer
@@ -153,7 +153,7 @@ pub fn run(
 
     var viewer: Viewer = Viewer.init(gpa, io, choice, clock, .{ .writeFn = writeTerminal }, .{
         .present_fps = present_fps,
-        .overlay = p.overlay,
+        .detailed_stats = p.overlay,
         .window = startWindow(events.winSize(), cs.winsize),
     }) catch |err| {
         diag.set("cannot start the {t} renderer: {t}", .{ choice.backend, err });
@@ -186,6 +186,8 @@ pub fn run(
             .aspect = if (engine.aspect()) |a| @floatCast(a) else null,
             .on_schedule = engine.onSchedule(),
             .status = status(&engine, now),
+            // Until `Modes` is wired in (roadmap 06, step 10).
+            .view = .{ .mode = .game, .legacy = false, .menu = null, .box = null },
         }, engine.stats(), now) catch |err| {
             diag.set("drawing failed: {t}", .{err});
             return err;
@@ -230,9 +232,9 @@ pub fn run(
                 .faster => engine.apply(.faster, t),
                 .slower => engine.apply(.slower, t),
                 .reset_speed => engine.apply(.reset_speed, t),
-                .toggle_overlay => viewer.toggleOverlay(),
+                .toggle_overlay => viewer.toggleStats(),
             }
-            if (action != .toggle_overlay) viewer.overlayChanged();
+            if (action != .toggle_overlay) viewer.statusChanged();
             log.debug("key: {t} (speed {f}{s})", .{ action, SpeedFmt{ .s = engine.speed() }, if (engine.paused()) ", paused" else "" });
         }
     }

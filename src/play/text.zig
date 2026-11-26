@@ -51,9 +51,23 @@ pub fn width(s: []const u8) usize {
 }
 
 /// Writes `s` cleaned, at most `max_cells` cells of it (a wide character
-/// that doesn't fit is left out) and only while `w` has room. Returns the
-/// cells written.
-pub fn writeClean(w: *std.Io.Writer, s: []const u8, max_cells: usize) usize {
+/// that doesn't fit is left out). Returns the cells written.
+pub fn writeClean(w: *std.Io.Writer, s: []const u8, max_cells: usize) std.Io.Writer.Error!usize {
+    var i: usize = 0;
+    var n: usize = 0;
+    while (i < s.len) {
+        const u = unitAt(s, i);
+        if (n + u.cells > max_cells) break;
+        try w.writeAll(u.bytes);
+        i += u.len;
+        n += u.cells;
+    }
+    return n;
+}
+
+/// `writeClean` into a fixed writer, stopping (not failing) when it is
+/// full, so whatever fits is kept whole.
+pub fn writeCleanFit(w: *std.Io.Writer, s: []const u8, max_cells: usize) usize {
     var i: usize = 0;
     var n: usize = 0;
     while (i < s.len) {
@@ -72,7 +86,7 @@ const testing = std.testing;
 
 fn clean(buf: []u8, s: []const u8, max: usize) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
-    _ = writeClean(&w, s, max);
+    _ = writeClean(&w, s, max) catch unreachable;
     return w.buffered();
 }
 
@@ -92,9 +106,16 @@ test "wide characters take two cells and are never split" {
     try testing.expectEqualStrings("é·×", clean(&buf, "é·×", 3));
 }
 
-test "stops when the writer is full" {
+test "the plain variant grows an allocating writer" {
+    var aw: std.Io.Writer.Allocating = try .initCapacity(testing.allocator, 1);
+    defer aw.deinit();
+    try testing.expectEqual(26, try writeClean(&aw.writer, "Press Ctrl-C again to quit", 99));
+    try testing.expectEqualStrings("Press Ctrl-C again to quit", aw.written());
+}
+
+test "the fit variant stops when the fixed writer is full" {
     var buf: [6]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try testing.expectEqual(3, writeClean(&w, "aドラ", 99));
+    try testing.expectEqual(3, writeCleanFit(&w, "aドラ", 99));
     try testing.expectEqualStrings("aド", w.buffered());
 }

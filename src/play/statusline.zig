@@ -81,8 +81,8 @@ fn segment(buf: *[seg_cap]u8, st: State, list: []const Component) []const u8 {
         // A component longer than the segment is cut, not an error.
         writeComponent(&tw, st, c) catch {};
         if (tw.end == 0) continue;
-        if (w.end > 0) _ = text.writeClean(&w, component_sep, seg_cap);
-        _ = text.writeClean(&w, tw.buffered(), seg_cap);
+        if (w.end > 0) _ = text.writeCleanFit(&w, component_sep, seg_cap);
+        _ = text.writeCleanFit(&w, tw.buffered(), seg_cap);
     }
     return w.buffered();
 }
@@ -116,7 +116,7 @@ fn compose(w: *std.Io.Writer, left: []const u8, center: []const u8, right: []con
     var at: usize = 0;
     try w.writeByte(' ');
     at += 1;
-    at += text.writeClean(w, left, cols - at);
+    at += try text.writeClean(w, left, cols - at);
     if (at >= cols) return;
 
     const gap = 2;
@@ -138,11 +138,11 @@ fn compose(w: *std.Io.Writer, left: []const u8, center: []const u8, right: []con
         const lo = at + gap;
         const hi = cols - r_total - after - c_cells;
         try pad(w, &at, std.math.clamp(ideal, lo, hi));
-        at += text.writeClean(w, center, c_cells);
+        at += try text.writeClean(w, center, c_cells);
     }
     if (r_cells > 0) {
         try pad(w, &at, cols - r_total + gap);
-        at += text.writeClean(w, right, r_cells);
+        at += try text.writeClean(w, right, r_cells);
     }
     try pad(w, &at, cols);
 }

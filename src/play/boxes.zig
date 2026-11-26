@@ -64,7 +64,7 @@ pub fn draw(w: *std.Io.Writer, rect: Rect, lines: []const []const u8, basic_colo
         }
         try w.writeAll("│ ");
         const l = if (r - 1 < lines.len) lines[r - 1] else "";
-        var n = text.writeClean(w, l, inner);
+        var n = try text.writeClean(w, l, inner);
         while (n < inner) : (n += 1) try w.writeByte(' ');
         try w.writeAll(" │");
     }
