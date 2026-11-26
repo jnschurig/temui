@@ -162,6 +162,7 @@ test {
     _ = @import("play/Modes.zig");
     _ = @import("play/stdio.zig");
     _ = @import("play/events.zig");
+    _ = @import("play/Watchdog.zig");
     _ = @import("play/Engine.zig");
     _ = @import("play/Viewer.zig");
     _ = @import("play/smoke_test.zig");
