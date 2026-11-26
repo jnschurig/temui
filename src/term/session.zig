@@ -61,7 +61,23 @@ const Saved = if (is_windows) struct {
     in_mode: win.DWORD,
     out_mode: win.DWORD,
     out_cp: win.UINT,
-} else c.termios;
+} else Termios;
+
+/// libc's `struct termios`, with room to spare. On Linux, `std.c.termios`
+/// is the kernel's layout (`NCCS` 19, 44 bytes), but glibc and musl use
+/// `NCCS` 32 (60 bytes), so `tcgetattr` into a bare `c.termios` writes 16
+/// bytes past it. On x86_64 Debug builds that overwrote `enter`'s stack
+/// frame and crashed. The fields temui touches (the flags and `cc[VMIN]`,
+/// `cc[VTIME]`) are at the same offsets in both layouts; pass `&x.t`.
+const Termios = extern struct {
+    t: c.termios,
+    libc_tail: [if (builtin.os.tag == .linux) 64 else 0]u8 = undefined,
+
+    comptime {
+        // glibc and musl's struct termios on the arches temui targets.
+        if (builtin.os.tag == .linux) std.debug.assert(@sizeOf(Termios) >= 60);
+    }
+};
 
 /// Global session state. `active` gates `restore`; the rest is written by
 /// `enter` before `active` is set and before any handler is installed.
@@ -91,7 +107,7 @@ pub fn enter(opts: Options) EnterError!void {
     if (is_windows) try enterWindows() else try enterPosix();
     if (!is_windows and opts.contain_stdio != .off) {
         containPosix(opts.contain_stdio) catch {
-            _ = c.tcsetattr(in_fd, .FLUSH, &saved.?);
+            _ = c.tcsetattr(in_fd, .FLUSH, &saved.?.t);
             return error.ContainFailed;
         };
     }
@@ -169,7 +185,7 @@ pub fn restore() void {
             _ = SetConsoleOutputCP(s.out_cp);
         } else {
             // FLUSH: unread replies and keys don't spill into the shell.
-            _ = c.tcsetattr(in_fd, .FLUSH, s);
+            _ = c.tcsetattr(in_fd, .FLUSH, &s.t);
         }
     }
 }
@@ -199,12 +215,13 @@ fn writeAll(fd: Fd, bytes: []const u8) bool {
 // ---------------------------------------------------------------- POSIX
 
 fn enterPosix() EnterError!void {
-    var t: c.termios = undefined;
-    if (c.tcgetattr(0, &t) != 0) return error.NotATerminal;
+    var buf: Termios = undefined;
+    if (c.tcgetattr(0, &buf.t) != 0) return error.NotATerminal;
     if (c.isatty(1) != 1) return error.NotATerminal;
     in_fd = 0;
     out_fd = 1;
-    saved = t;
+    saved = buf;
+    const t = &buf.t;
     t.lflag.ICANON = false;
     t.lflag.ECHO = false;
     t.lflag.ISIG = false;
@@ -213,7 +230,7 @@ fn enterPosix() EnterError!void {
     t.iflag.ICRNL = false;
     t.cc[@backingInt(c.V.MIN)] = 1;
     t.cc[@backingInt(c.V.TIME)] = 0;
-    if (c.tcsetattr(0, .FLUSH, &t) != 0) return error.NotATerminal;
+    if (c.tcsetattr(0, .FLUSH, t) != 0) return error.NotATerminal;
 }
 
 /// Moves terminal output to a private fd and points fds 1 and 2 at a pipe
