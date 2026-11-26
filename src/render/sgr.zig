@@ -61,22 +61,79 @@ fn inSpan(s: Span, i: u32) bool {
     return i >= s[0] and i < s[1];
 }
 
+/// The most occluding rects a present takes (the leader menu and a
+/// centered box, with room to spare).
+pub const max_occlusions = 4;
+
+/// Up to `max_occlusions` spans of one row; they may overlap.
+pub const SpanSet = struct {
+    spans: [max_occlusions]Span = undefined,
+    len: u8 = 0,
+
+    pub const empty: SpanSet = .{};
+
+    pub fn one(s: Span) SpanSet {
+        var set: SpanSet = .{};
+        set.add(s);
+        return set;
+    }
+
+    /// The columns of `box` row `row` that `rects` cover, relative to
+    /// `box.col` (see `rowSpan`).
+    pub fn ofRow(rects: []const Rect, box: Rect, row: u32) SpanSet {
+        std.debug.assert(rects.len <= max_occlusions);
+        var set: SpanSet = .{};
+        for (rects) |r| set.add(rowSpan(r, box, row));
+        return set;
+    }
+
+    /// Adds `s`; empty spans are dropped.
+    pub fn add(set: *SpanSet, s: Span) void {
+        if (s[0] >= s[1]) return;
+        std.debug.assert(set.len < max_occlusions);
+        set.spans[set.len] = s;
+        set.len += 1;
+    }
+
+    pub fn contains(set: *const SpanSet, i: u32) bool {
+        for (set.spans[0..set.len]) |s| if (inSpan(s, i)) return true;
+        return false;
+    }
+};
+
+/// A copy of up to `max_occlusions` rects, kept between presents.
+pub const Occlusion = struct {
+    buf: [max_occlusions]Rect = undefined,
+    len: u8 = 0,
+
+    pub fn init(rects: []const Rect) Occlusion {
+        std.debug.assert(rects.len <= max_occlusions);
+        var o: Occlusion = .{ .len = @intCast(rects.len) };
+        @memcpy(o.buf[0..rects.len], rects);
+        return o;
+    }
+
+    pub fn slice(o: *const Occlusion) []const Rect {
+        return o.buf[0..o.len];
+    }
+};
+
 /// Iterates the runs `[a, b)` of a row where `new` differs from `old`
 /// (`Cell.eql`), merging runs separated by at most `merge_gap` unchanged
 /// cells. Cells in `force` count as changed (a full redraw forces the whole
-/// row); cells in `skip` never do, and no run spans them (they are under an
-/// overlay the caller draws).
+/// row); cells in `skip` never do, and no run crosses them (they are under
+/// a box the caller draws).
 pub fn ChangedRuns(comptime Cell: type) type {
     return struct {
         new: []const Cell,
         old: []const Cell,
-        force: Span = no_span,
-        skip: Span = no_span,
+        force: SpanSet = .empty,
+        skip: SpanSet = .empty,
         x: u32 = 0,
 
         fn changed(it: *const @This(), i: u32) bool {
-            if (inSpan(it.skip, i)) return false;
-            return inSpan(it.force, i) or !it.new[i].eql(it.old[i]);
+            if (it.skip.contains(i)) return false;
+            return it.force.contains(i) or !it.new[i].eql(it.old[i]);
         }
 
         pub fn next(it: *@This()) ?[2]u32 {
@@ -87,7 +144,7 @@ pub fn ChangedRuns(comptime Cell: type) type {
             var last = a;
             var j = a + 1;
             // `j - last - 1` unchanged cells lie between `last` and `j`.
-            while (j < n and j - last - 1 <= merge_gap and !inSpan(it.skip, j)) : (j += 1) {
+            while (j < n and j - last - 1 <= merge_gap and !it.skip.contains(j)) : (j += 1) {
                 if (it.changed(j)) last = j;
             }
             it.x = last + 1;
@@ -97,9 +154,8 @@ pub fn ChangedRuns(comptime Cell: type) type {
 }
 
 /// The columns of `box` row `row` (absolute, 1-based) that `r` covers, as a
-/// span relative to `box.col`; `no_span` when `r` is null or misses the row.
-pub fn rowSpan(r: ?Rect, box: Rect, row: u32) Span {
-    const o = r orelse return no_span;
+/// span relative to `box.col`; `no_span` when `r` misses the row.
+pub fn rowSpan(o: Rect, box: Rect, row: u32) Span {
     if (row < o.row or row >= o.row + o.rows) return no_span;
     const a = @max(o.col, box.col);
     const b = @min(o.col + o.cols, box.col + box.cols);
@@ -190,24 +246,73 @@ test "ChangedRuns: force redraws equal cells, skip is never drawn or bridged" {
     new[5].v = 1;
     new[7].v = 1;
     // A forced whole row with cells 4..6 skipped splits around them.
-    var full: ChangedRuns(C) = .{ .new = &new, .old = &old, .force = .{ 0, 12 }, .skip = .{ 4, 6 } };
+    var full: ChangedRuns(C) = .{ .new = &new, .old = &old, .force = .one(.{ 0, 12 }), .skip = .one(.{ 4, 6 }) };
     try std.testing.expectEqual([2]u32{ 0, 4 }, full.next().?);
     try std.testing.expectEqual([2]u32{ 6, 12 }, full.next().?);
     try std.testing.expectEqual(@as(?[2]u32, null), full.next());
     // Changed cells 5 and 7 with 6 skipped: 5 is hidden, 7 drawn alone (the
     // gap merge would otherwise bridge 6).
-    var skip: ChangedRuns(C) = .{ .new = &new, .old = &old, .skip = .{ 5, 7 } };
+    var skip: ChangedRuns(C) = .{ .new = &new, .old = &old, .skip = .one(.{ 5, 7 }) };
     try std.testing.expectEqual([2]u32{ 7, 8 }, skip.next().?);
     try std.testing.expectEqual(@as(?[2]u32, null), skip.next());
     // Uncovered cells 0..2 forced; merged with changed 5 across the gap.
-    var force: ChangedRuns(C) = .{ .new = &new, .old = &old, .force = .{ 0, 2 } };
+    var force: ChangedRuns(C) = .{ .new = &new, .old = &old, .force = .one(.{ 0, 2 }) };
     try std.testing.expectEqual([2]u32{ 0, 2 }, force.next().?);
     try std.testing.expectEqual([2]u32{ 5, 8 }, force.next().?);
 }
 
+test "ChangedRuns: several skipped and forced spans" {
+    const C = struct {
+        v: u8,
+        pub fn eql(a: @This(), b: @This()) bool {
+            return a.v == b.v;
+        }
+    };
+    const old: [16]C = @splat(.{ .v = 0 });
+    var new = old;
+    for (&new) |*c| c.v = 1;
+    // Every cell changed; two disjoint skips split the row in three, and
+    // an overlapping pair acts as their union.
+    var skip: SpanSet = .{};
+    skip.add(.{ 2, 4 });
+    skip.add(.{ 9, 11 });
+    skip.add(.{ 10, 12 });
+    var it: ChangedRuns(C) = .{ .new = &new, .old = &old, .skip = skip };
+    try std.testing.expectEqual([2]u32{ 0, 2 }, it.next().?);
+    try std.testing.expectEqual([2]u32{ 4, 9 }, it.next().?);
+    try std.testing.expectEqual([2]u32{ 12, 16 }, it.next().?);
+    try std.testing.expectEqual(@as(?[2]u32, null), it.next());
+    // Unchanged row: only the forced spans, each its own run.
+    var force: SpanSet = .{};
+    force.add(.{ 0, 1 });
+    force.add(.{ 8, 10 });
+    force.add(.{ 5, 5 }); // empty: dropped
+    try std.testing.expectEqual(2, force.len);
+    var f: ChangedRuns(C) = .{ .new = &old, .old = &old, .force = force };
+    try std.testing.expectEqual([2]u32{ 0, 1 }, f.next().?);
+    try std.testing.expectEqual([2]u32{ 8, 10 }, f.next().?);
+    try std.testing.expectEqual(@as(?[2]u32, null), f.next());
+}
+
+test "SpanSet.ofRow keeps only the rects on the row" {
+    const box: Rect = .{ .col = 11, .row = 3, .cols = 20, .rows = 5 };
+    const rects = [_]Rect{
+        .{ .col = 11, .row = 3, .cols = 4, .rows = 2 },
+        .{ .col = 20, .row = 4, .cols = 3, .rows = 1 },
+        .{ .col = 40, .row = 3, .cols = 3, .rows = 1 }, // outside the box
+    };
+    const r3 = SpanSet.ofRow(&rects, box, 3);
+    try std.testing.expectEqual(1, r3.len);
+    try std.testing.expectEqual(Span{ 0, 4 }, r3.spans[0]);
+    const r4 = SpanSet.ofRow(&rects, box, 4);
+    try std.testing.expectEqual(2, r4.len);
+    try std.testing.expect(r4.contains(0) and r4.contains(9) and !r4.contains(5));
+    try std.testing.expectEqual(0, SpanSet.ofRow(&rects, box, 5).len);
+    try std.testing.expectEqual(0, SpanSet.ofRow(&.{}, box, 3).len);
+}
+
 test "rowSpan clips to the box" {
     const box: Rect = .{ .col = 11, .row = 3, .cols = 20, .rows = 5 };
-    try std.testing.expectEqual(no_span, rowSpan(null, box, 3));
     const o: Rect = .{ .col = 11, .row = 3, .cols = 8, .rows = 1 };
     try std.testing.expectEqual(Span{ 0, 8 }, rowSpan(o, box, 3));
     try std.testing.expectEqual(no_span, rowSpan(o, box, 4));

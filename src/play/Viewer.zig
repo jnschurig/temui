@@ -231,7 +231,8 @@ pub fn update(v: *Viewer, src: Source, stats: *Stats, now: i96) !void {
     };
     const t0 = v.clock.now();
     if (present) {
-        try v.renderer.present(w, src.frame, v.rect, .{ .aspect = src.aspect, .occlude = cover });
+        const covers: []const Rect = if (cover) |*c| c[0..1] else &.{};
+        try v.renderer.present(w, src.frame, v.rect, .{ .aspect = src.aspect, .occlude = covers });
         // A window too small for the picture draws nothing: not a present.
         if (!box.isEmpty()) {
             const t1 = v.clock.now();

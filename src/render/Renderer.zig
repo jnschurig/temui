@@ -30,11 +30,12 @@ pub const Options = struct {
 pub const PresentOptions = struct {
     /// Display aspect (width / height); default: the frame's own.
     aspect: ?f32 = null,
-    /// Cells an overlay occupies. Half-block and ASCII never draw inside it,
-    /// and redraw what it uncovers on the next `present` once it shrinks or
-    /// goes (even if the pixels there are unchanged). Kitty ignores it: its
-    /// image sits below cells with a background (`Choice.kitty_z`).
-    occlude: ?Rect = null,
+    /// Cells boxes occupy, at most `sgr.max_occlusions` rects. Half-block
+    /// and ASCII never draw inside them, and redraw what they uncover on the
+    /// next `present` once one shrinks or goes (even if the pixels there are
+    /// unchanged). Kitty ignores them: its image sits below cells with a
+    /// background (`Choice.kitty_z`).
+    occlude: []const Rect = &.{},
 };
 
 impl: union(Backend) {
@@ -326,7 +327,7 @@ fn countCells(cells: [24][80]bool, in: ?Rect) usize {
     return n;
 }
 
-fn drawWith(r: *Renderer, frame: Frame, rect: Rect, occlude: ?Rect) ![24][80]bool {
+fn drawWith(r: *Renderer, frame: Frame, rect: Rect, occlude: []const Rect) ![24][80]bool {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     try r.present(&aw.writer, frame, rect, .{ .occlude = occlude });
@@ -364,30 +365,30 @@ test "occlusion: covered cells are never drawn; uncovered ones are redrawn" {
         defer r.deinit();
 
         // First (full) present: everything but the overlay's cells.
-        var cells = try drawWith(&r, frame, golden.rect, wide);
+        var cells = try drawWith(&r, frame, golden.rect, &.{wide});
         try testing.expectEqual(box_cells - 20, countCells(cells, null));
         try testing.expectEqual(0, countCells(cells, wide));
 
         // Same frame and overlay: nothing.
-        cells = try drawWith(&r, frame, golden.rect, wide);
+        cells = try drawWith(&r, frame, golden.rect, &.{wide});
         try testing.expectEqual(0, countCells(cells, null));
 
         // Every pixel changes under the overlay: still not drawn there.
-        cells = try drawWith(&r, inv, golden.rect, wide);
+        cells = try drawWith(&r, inv, golden.rect, &.{wide});
         try testing.expectEqual(box_cells - 20, countCells(cells, null));
         try testing.expectEqual(0, countCells(cells, wide));
 
         // The overlay shrinks with the pixels unchanged: exactly the 12
         // uncovered cells are redrawn.
-        cells = try drawWith(&r, inv, golden.rect, narrow);
+        cells = try drawWith(&r, inv, golden.rect, &.{narrow});
         try testing.expectEqual(12, countCells(cells, null));
         try testing.expectEqual(12, countCells(cells, .{ .col = 21, .row = 1, .cols = 12, .rows = 1 }));
 
         // The overlay goes away: its 8 cells come back, nothing else.
-        cells = try drawWith(&r, inv, golden.rect, null);
+        cells = try drawWith(&r, inv, golden.rect, &.{});
         try testing.expectEqual(8, countCells(cells, null));
         try testing.expectEqual(8, countCells(cells, narrow));
-        cells = try drawWith(&r, inv, golden.rect, null);
+        cells = try drawWith(&r, inv, golden.rect, &.{});
         try testing.expectEqual(0, countCells(cells, null));
     }
 }
@@ -400,8 +401,45 @@ test "occlusion outside the box, or overlapping its edge, is clipped" {
         var r: Renderer = try .init(gpa, testing.io, testChoice(b), .{});
         defer r.deinit();
         // Cols 1..20 of row 3: only box cols 13..20 (8 cells) are inside.
-        const cells = try drawWith(&r, frame, golden.rect, .{ .col = 1, .row = 3, .cols = 20, .rows = 1 });
+        const cells = try drawWith(&r, frame, golden.rect, &.{.{ .col = 1, .row = 3, .cols = 20, .rows = 1 }});
         try testing.expectEqual(55 * 24 - 8, countCells(cells, null));
+    }
+}
+
+test "occlusion: several rects, on one row and on different rows, overlapping" {
+    const gpa = testing.allocator;
+    const frame = try golden.loadFrame60(gpa);
+    defer gpa.free(frame.rgb);
+    const box_cells = 55 * 24; // the box is 55×24 at col 13
+    // Two disjoint rects on row 2, one 2-row rect lower down, and one that
+    // overlaps its bottom-right corner by 2 cells (cols 28–29 of row 11).
+    const a: Rect = .{ .col = 13, .row = 2, .cols = 5, .rows = 1 };
+    const b: Rect = .{ .col = 30, .row = 2, .cols = 4, .rows = 1 };
+    const c: Rect = .{ .col = 20, .row = 10, .cols = 10, .rows = 2 };
+    const d: Rect = .{ .col = 28, .row = 11, .cols = 6, .rows = 3 };
+    // Union: 5 + 4 + 20 + 18, minus the 2-cell overlap.
+    const covered = 5 + 4 + 20 + 18 - 2;
+    for ([_]Backend{ .halfblock, .ascii }) |be| {
+        var r: Renderer = try .init(gpa, testing.io, testChoice(be), .{});
+        defer r.deinit();
+        var cells = try drawWith(&r, frame, golden.rect, &.{ a, b, c, d });
+        try testing.expectEqual(box_cells - covered, countCells(cells, null));
+        for ([_]Rect{ a, b, c, d }) |o| try testing.expectEqual(0, countCells(cells, o));
+
+        // Remove b and c: exactly their cells come back, minus what d still
+        // covers of c.
+        cells = try drawWith(&r, frame, golden.rect, &.{ a, d });
+        try testing.expectEqual(4 + 20 - 2, countCells(cells, null));
+        try testing.expectEqual(4, countCells(cells, b));
+        try testing.expectEqual(18, countCells(cells, c));
+        try testing.expectEqual(0, countCells(cells, a));
+        try testing.expectEqual(0, countCells(cells, d));
+
+        // Removing the rest brings back a and d only.
+        cells = try drawWith(&r, frame, golden.rect, &.{});
+        try testing.expectEqual(5 + 18, countCells(cells, null));
+        cells = try drawWith(&r, frame, golden.rect, &.{});
+        try testing.expectEqual(0, countCells(cells, null));
     }
 }
 
