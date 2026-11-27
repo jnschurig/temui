@@ -5,7 +5,8 @@
 //! pipe, with the timeout floored to whole ms and the sub-ms rest slept with
 //! `nanosleep`. Windows: `WaitForMultipleObjects` on the console input
 //! handle and a high-resolution waitable timer; console `KEY_EVENT`s become
-//! UTF-8 bytes for the key decoder, `WINDOW_BUFFER_SIZE_EVENT` a resize.
+//! `keys.Input`s (`console_keys.translate`, in `Wake.keys`), and
+//! `WINDOW_BUFFER_SIZE_EVENT` a resize.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -13,6 +14,8 @@ const Io = std.Io;
 const caps = @import("../term/caps.zig");
 const detect = @import("../term/detect.zig");
 const session = @import("../term/session.zig");
+const keys = @import("../term/keys.zig");
+const console_keys = @import("../term/console_keys.zig");
 
 const is_windows = builtin.os.tag == .windows;
 const c = std.c;
@@ -20,6 +23,21 @@ const posix = std.posix;
 const win = std.os.windows;
 
 pub const Fd = session.Fd;
+
+/// One unit of raw terminal input: a byte (POSIX) or a console input record
+/// (Windows).
+pub const Raw = if (is_windows) console_keys.InputRecord else u8;
+
+/// Input the watchdog read on the loop's behalf, and the loop's waiting
+/// state, guarded by the watchdog's lock.
+pub const Handback = struct {
+    ctx: *anyopaque,
+    /// Marks the loop as in its wait, and moves the input the watchdog read
+    /// into `out`. Returns how many units it moved.
+    enterFn: *const fn (ctx: *anyopaque, out: []Raw) usize,
+    /// Marks the loop as busy again.
+    leaveFn: *const fn (ctx: *anyopaque) void,
+};
 
 const Events = @This();
 
@@ -30,13 +48,16 @@ pub const Options = struct {
     out: Fd,
     /// The stdio containment pipe's read end (POSIX), if any.
     stdio: ?Fd = null,
+    handback: ?Handback = null,
 };
 
 /// What ended a wait. Several fields can be set at once; all empty means
 /// the deadline passed.
 pub const Wake = struct {
-    /// Bytes read from the terminal (valid until the next `wait`).
+    /// Bytes read from the terminal (POSIX; valid until the next `wait`).
     input: []const u8 = "",
+    /// Keys and focus changes (Windows; valid until the next `wait`).
+    keys: []const keys.Input = &.{},
     /// The terminal input reached end of file (it went away).
     eof: bool = false,
     /// The window was resized; re-read `winSize`.
@@ -45,12 +66,20 @@ pub const Wake = struct {
     stdio_ready: bool = false,
 };
 
+/// Most `keys.Input`s one wait returns; a record's extra repeats past it
+/// are dropped.
+pub const max_keys = 128;
+
 io: Io,
 opts: Options,
 buf: [512]u8 = undefined,
-/// Windows: the waitable timer and a pending high surrogate.
+/// Console records read (Windows), and their translation.
+records: [64]console_keys.InputRecord = undefined,
+key_buf: [max_keys]keys.Input = undefined,
+down: console_keys.DownSet = .empty,
+vk_to_char: console_keys.VkToChar = console_keys.systemVkToChar,
+/// Windows: the waitable timer.
 timer: if (is_windows) win.HANDLE else void = undefined,
-high_surrogate: if (is_windows) u16 else void = if (is_windows) 0 else {},
 /// POSIX: the SIGWINCH self-pipe's read end and the previous action.
 winch_read: if (is_windows) void else c.fd_t = undefined,
 prev_winch: if (is_windows) void else posix.Sigaction = undefined,
@@ -102,8 +131,17 @@ pub fn deinit(self: *Events) void {
 /// Waits until `deadline_ns` (on `Io.Clock.awake`; null: no deadline),
 /// terminal input, a resize or stdio data, whichever comes first. Never
 /// returns before the deadline when nothing else happened. EINTR counts as
-/// a wake (with nothing set).
+/// a wake (with nothing set). Input the handback holds is returned at once.
 pub fn wait(self: *Events, deadline_ns: ?i96) !Wake {
+    const hb = self.opts.handback orelse return self.waitInner(deadline_ns);
+    const raw: []Raw = if (is_windows) &self.records else &self.buf;
+    const n = hb.enterFn(hb.ctx, raw);
+    defer hb.leaveFn(hb.ctx);
+    if (n > 0) return if (is_windows) self.translateRecords(self.records[0..n]) else .{ .input = self.buf[0..n] };
+    return self.waitInner(deadline_ns);
+}
+
+fn waitInner(self: *Events, deadline_ns: ?i96) !Wake {
     return if (is_windows) self.waitWindows(deadline_ns) else self.waitPosix(deadline_ns);
 }
 
@@ -201,30 +239,7 @@ const TIMER_ALL_ACCESS: win.DWORD = 0x001F0003;
 const WAIT_OBJECT_0: win.DWORD = 0;
 const WAIT_TIMEOUT: win.DWORD = 0x102;
 const INFINITE: win.DWORD = 0xFFFFFFFF;
-const KEY_EVENT: u16 = 0x0001;
-const WINDOW_BUFFER_SIZE_EVENT: u16 = 0x0004;
-
-const KeyEventRecord = extern struct {
-    bKeyDown: win.BOOL,
-    wRepeatCount: u16,
-    wVirtualKeyCode: u16,
-    wVirtualScanCode: u16,
-    UnicodeChar: u16,
-    dwControlKeyState: win.DWORD,
-};
-
-const InputRecord = extern struct {
-    EventType: u16,
-    Event: extern union {
-        key: KeyEventRecord,
-        /// Mouse, window size, menu and focus records; only the type matters.
-        other: [16]u8,
-    },
-};
-
-comptime {
-    std.debug.assert(@sizeOf(InputRecord) == 20);
-}
+const InputRecord = console_keys.InputRecord;
 
 extern "kernel32" fn CreateWaitableTimerExW(attrs: ?*anyopaque, name: ?[*:0]const u16, flags: win.DWORD, access: win.DWORD) callconv(.winapi) ?win.HANDLE;
 extern "kernel32" fn SetWaitableTimer(timer: win.HANDLE, due: *const i64, period: i32, completion: ?*anyopaque, arg: ?*anyopaque, resume_: win.BOOL) callconv(.winapi) win.BOOL;
@@ -262,54 +277,49 @@ fn waitWindows(self: *Events, deadline_ns: ?i96) !Wake {
     return self.readConsole(self.opts.in.?);
 }
 
-/// Reads exactly the queued events (`ReadConsoleInputW` blocks on an empty
-/// queue) and turns them into bytes and a resize flag.
+/// Reads up to one batch of the queued records (`ReadConsoleInputW` blocks
+/// on an empty queue; the handle stays signalled while more are queued, so
+/// the next wait returns at once) and translates them.
 fn readConsole(self: *Events, in: win.HANDLE) !Wake {
-    var wake: Wake = .{};
     var queued: win.DWORD = 0;
     if (GetNumberOfConsoleInputEvents(in, &queued) == .FALSE) return error.ReadFailed;
-    var records: [64]InputRecord = undefined;
-    var len: usize = 0;
-    while (queued > 0) {
-        var got: win.DWORD = 0;
-        const want: win.DWORD = @min(queued, records.len);
-        if (ReadConsoleInputW(in, &records, want, &got) == .FALSE) return error.ReadFailed;
-        queued -= @min(queued, got);
-        for (records[0..got]) |rec| switch (rec.EventType) {
-            WINDOW_BUFFER_SIZE_EVENT => wake.resized = true,
-            KEY_EVENT => {
-                const k = rec.Event.key;
-                if (k.bKeyDown == .FALSE or k.UnicodeChar == 0) continue;
-                var reps = @max(k.wRepeatCount, 1);
-                while (reps > 0) : (reps -= 1) len = self.appendUtf16(len, k.UnicodeChar);
-            },
-            else => {},
-        };
-        if (got == 0) break;
-    }
-    wake.input = self.buf[0..len];
-    return wake;
+    if (queued == 0) return .{};
+    var got: win.DWORD = 0;
+    const want: win.DWORD = @min(queued, self.records.len);
+    if (ReadConsoleInputW(in, &self.records, want, &got) == .FALSE) return error.ReadFailed;
+    return self.translateRecords(self.records[0..got]);
 }
 
-/// Appends one UTF-16 unit as UTF-8 at `len` (pairing surrogates across
-/// records); drops it when the buffer is full. Returns the new length.
-fn appendUtf16(self: *Events, len: usize, unit: u16) usize {
-    if (is_windows) {
-        var cp: u21 = unit;
-        if (std.unicode.utf16IsHighSurrogate(unit)) {
-            self.high_surrogate = unit;
-            return len;
-        }
-        if (std.unicode.utf16IsLowSurrogate(unit)) {
-            const hi = self.high_surrogate;
-            self.high_surrogate = 0;
-            if (hi == 0) return len;
-            cp = std.unicode.utf16DecodeSurrogatePair(&.{ hi, unit }) catch return len;
-        }
-        if (len + 4 > self.buf.len) return len;
-        return len + (std.unicode.utf8Encode(cp, self.buf[len..]) catch 0);
-    }
-    unreachable;
+/// Console records → keys, focus changes and a resize flag. A record with
+/// `wRepeatCount` n stands for n events: the rest are repeats.
+fn translateRecords(self: *Events, records: []const InputRecord) Wake {
+    var wake: Wake = .{};
+    var n: usize = 0;
+    for (records) |rec| switch (rec.EventType) {
+        console_keys.WINDOW_BUFFER_SIZE_EVENT => wake.resized = true,
+        console_keys.FOCUS_EVENT => if (n < self.key_buf.len) {
+            self.key_buf[n] = .{ .focus = rec.Event.focus != 0 };
+            n += 1;
+        },
+        console_keys.KEY_EVENT => {
+            const k = rec.Event.key;
+            const ev = console_keys.translate(k, &self.down, self.vk_to_char) orelse continue;
+            if (n == self.key_buf.len) continue;
+            self.key_buf[n] = .{ .key = ev };
+            n += 1;
+            if (ev.kind == .release) continue;
+            var rep = ev;
+            rep.kind = .repeat;
+            var extra = @max(k.wRepeatCount, 1) - 1;
+            while (extra > 0 and n < self.key_buf.len) : (extra -= 1) {
+                self.key_buf[n] = .{ .key = rep };
+                n += 1;
+            }
+        },
+        else => {},
+    };
+    wake.keys = self.key_buf[0..n];
+    return wake;
 }
 
 // ---------------------------------------------------------------- tests
@@ -385,12 +395,88 @@ test "input, stdio readiness and end of input" {
     try testing.expect(e.eof);
 }
 
-test "Windows: surrogate pairs become one UTF-8 sequence" {
-    if (!is_windows) return error.SkipZigTest;
-    var ev: Events = try .init(testing.io, .{ .in = null, .out = undefined });
+test "console records become keys, repeats, focus changes and resizes" {
+    // Pure: runs on every OS.
+    var ev: Events = .{ .io = testing.io, .opts = .{ .in = null, .out = undefined }, .vk_to_char = console_keys.usTable };
+    const rec = console_keys.testRecord;
+    var held = rec(true, 'E', 'e', 0);
+    held.wRepeatCount = 3;
+    const records = [_]InputRecord{
+        .keyRecord(rec(true, 'E', 'e', 0)),
+        .keyRecord(held),
+        .keyRecord(rec(false, 'E', 'e', 0)),
+        .focusRecord(false),
+        .{ .EventType = console_keys.WINDOW_BUFFER_SIZE_EVENT, .Event = .{ .other = @splat(0) } },
+        .keyRecord(rec(true, 0x13, 0, 0)), // VK_PAUSE: not modelled, dropped
+        .focusRecord(true),
+    };
+    const w = ev.translateRecords(&records);
+    try testing.expect(w.resized);
+    const e = keys.Event.char('e');
+    var rep = e;
+    rep.kind = .repeat;
+    var rel = e;
+    rel.kind = .release;
+    const want = [_]keys.Input{ .{ .key = e }, .{ .key = rep }, .{ .key = rep }, .{ .key = rep }, .{ .key = rel }, .{ .focus = false }, .{ .focus = true } };
+    try testing.expectEqual(want.len, w.keys.len);
+    for (want, w.keys) |a, b| switch (a) {
+        .key => |k| try testing.expect(b == .key and k.eql(b.key)),
+        .focus => |f| try testing.expect(b == .focus and b.focus == f),
+    };
+}
+
+test "a huge repeat count is capped at the key buffer" {
+    var ev: Events = .{ .io = testing.io, .opts = .{ .in = null, .out = undefined }, .vk_to_char = console_keys.usTable };
+    var r = console_keys.testRecord(true, 'E', 'e', 0);
+    r.wRepeatCount = 1000;
+    const w = ev.translateRecords(&.{ .keyRecord(r), .focusRecord(false) });
+    try testing.expectEqual(@as(usize, max_keys), w.keys.len);
+}
+
+const FakeHandback = struct {
+    pending: []const u8,
+    entered: usize = 0,
+    left: usize = 0,
+
+    fn enter(ctx: *anyopaque, out: []Raw) usize {
+        const f: *FakeHandback = @ptrCast(@alignCast(ctx));
+        f.entered += 1;
+        const n = @min(out.len, f.pending.len);
+        if (!is_windows) @memcpy(out[0..n], f.pending[0..n]);
+        f.pending = f.pending[n..];
+        return n;
+    }
+
+    fn leave(ctx: *anyopaque) void {
+        const f: *FakeHandback = @ptrCast(@alignCast(ctx));
+        f.left += 1;
+    }
+
+    fn handback(f: *FakeHandback) Handback {
+        return .{ .ctx = f, .enterFn = enter, .leaveFn = leave };
+    }
+};
+
+test "handed-back bytes are returned before a poll" {
+    if (is_windows) return error.SkipZigTest;
+    var in: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.pipe(&in));
+    defer _ = c.close(in[0]);
+    defer _ = c.close(in[1]);
+    var fake: FakeHandback = .{ .pending = "xy" };
+    var ev: Events = try .init(testing.io, .{ .in = in[0], .out = undefined, .handback = fake.handback() });
     defer ev.deinit();
-    var len = ev.appendUtf16(0, 'q');
-    len = ev.appendUtf16(len, 0xD83D);
-    len = ev.appendUtf16(len, 0xDE00);
-    try testing.expectEqualStrings("q\u{1F600}", ev.buf[0..len]);
+
+    // Nothing on the pipe and no deadline: this would block if it polled.
+    const w = try ev.wait(null);
+    try testing.expectEqualStrings("xy", w.input);
+    try testing.expectEqual(@as(usize, 1), fake.entered);
+    try testing.expectEqual(@as(usize, 1), fake.left);
+
+    // Empty handback: a normal wait, still bracketed.
+    _ = c.write(in[1], "z", 1);
+    const z = try ev.wait(null);
+    try testing.expectEqualStrings("z", z.input);
+    try testing.expectEqual(@as(usize, 2), fake.entered);
+    try testing.expectEqual(@as(usize, 2), fake.left);
 }

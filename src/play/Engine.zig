@@ -44,6 +44,8 @@ pub const Command = union(enum) {
     faster,
     slower,
     reset_speed,
+    /// The RetroPad state on port 0, applied before each frame from now on.
+    set_input: host.Buttons,
     quit,
 };
 
@@ -67,6 +69,8 @@ quit_requested: bool = false,
 /// The last tick ran every frame that was due (it was not cut short by
 /// its time budget). Always true unthrottled or paused.
 on_schedule: bool = true,
+/// Set by `set_input`; handed to the core right before every frame.
+input: host.Buttons = @splat(false),
 
 /// Over the already-loaded `host`.
 pub fn init(clock: Clock, config: Config) Engine {
@@ -93,6 +97,7 @@ pub fn apply(e: *Engine, cmd: Command, now: i96) void {
         .faster => p.setSpeed(p.speed.faster(), now),
         .slower => p.setSpeed(p.speed.slower(), now),
         .reset_speed => p.setSpeed(.normal, now),
+        .set_input => |b| e.input = b,
         .quit => e.quit_requested = true,
     }
 }
@@ -112,6 +117,7 @@ pub fn tick(e: *Engine, now: i96, budget_ns: u64) error{OutOfMemory}!Tick {
     var t: Tick = .{};
     var end = now;
     while (t.ran < due) {
+        host.setInput(e.input);
         try host.runFrame();
         _ = host.drainAudio(); // not played until item 09
         t.ran += 1;
@@ -174,7 +180,7 @@ const ns_per_s = std.time.ns_per_s;
 
 /// Every read advances it by `per_read`, then returns it: the cost of a
 /// frame, as the engine reads the clock once after each frame it runs.
-const FakeClock = struct {
+pub const FakeClock = struct {
     t: i96 = 0,
     per_read: i96 = 0,
 
@@ -184,12 +190,12 @@ const FakeClock = struct {
         return f.t;
     }
 
-    fn clock(f: *FakeClock) Clock {
+    pub fn clock(f: *FakeClock) Clock {
         return .{ .ctx = f, .nowFn = read };
     }
 };
 
-fn loadTestCore() !void {
+pub fn loadTestCore() !void {
     const o = @import("test_options");
     const dir = std.fs.path.dirname(o.testcore_rom) orelse ".";
     var diag: host.Diagnostic = .{};
@@ -204,13 +210,22 @@ fn loadTestCore() !void {
     };
 }
 
+const lr = @import("libretro");
+
 /// The test core's frame counter: u32 LE at SRAM offset 0.
 fn coreFrames() u32 {
-    const sram = host.memory(@import("libretro").RETRO_MEMORY_SAVE_RAM).?;
+    const sram = host.memory(lr.RETRO_MEMORY_SAVE_RAM).?;
     return std.mem.readInt(u32, sram[0..4], .little);
 }
 
-const no_budget = std.math.maxInt(u64);
+/// The input bitmask the test core saw on its last frame: u16 LE at SRAM
+/// offset 4.
+pub fn coreButtons() u16 {
+    const sram = host.memory(lr.RETRO_MEMORY_SAVE_RAM).?;
+    return std.mem.readInt(u16, sram[4..6], .little);
+}
+
+pub const no_budget = std.math.maxInt(u64);
 
 test "N steps while paused advance the core's frame counter by exactly N" {
     try loadTestCore();
@@ -312,4 +327,29 @@ test "speed commands walk the ladder; quit is recorded" {
     try testing.expect(!e.quitRequested());
     e.apply(.quit, 0);
     try testing.expect(e.quitRequested());
+}
+
+test "set_input reaches the core on the next frame and stays until changed" {
+    try loadTestCore();
+    defer host.unload();
+    var fc: FakeClock = .{};
+    var e: Engine = .init(fc.clock(), .{ .paused = true });
+    var b: host.Buttons = @splat(false);
+    b[lr.RETRO_DEVICE_ID_JOYPAD_A] = true;
+    b[lr.RETRO_DEVICE_ID_JOYPAD_UP] = true;
+    const mask = (@as(u16, 1) << lr.RETRO_DEVICE_ID_JOYPAD_A) | (@as(u16, 1) << lr.RETRO_DEVICE_ID_JOYPAD_UP);
+
+    e.apply(.{ .set_input = b }, fc.t);
+    e.apply(.step, fc.t);
+    try testing.expectEqual(1, (try e.tick(fc.t, no_budget)).ran);
+    try testing.expectEqual(mask, coreButtons());
+    // Held: still there on the next frame without another command.
+    e.apply(.step, fc.t);
+    _ = try e.tick(fc.t, no_budget);
+    try testing.expectEqual(mask, coreButtons());
+
+    e.apply(.{ .set_input = @splat(false) }, fc.t);
+    e.apply(.step, fc.t);
+    _ = try e.tick(fc.t, no_budget);
+    try testing.expectEqual(0, coreButtons());
 }

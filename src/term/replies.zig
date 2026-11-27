@@ -71,6 +71,12 @@ pub const Parser = struct {
     len: usize = 0,
     overflow: bool = false,
 
+    /// Whether the parser holds exactly one ESC and nothing after it: a
+    /// typed Esc, or the first byte of a sequence still on its way.
+    pub fn pendingLoneEsc(p: *const Parser) bool {
+        return p.state == .esc and p.len == 1;
+    }
+
     pub fn feed(p: *Parser, b: u8) ?Event {
         switch (p.state) {
             .ground => {
@@ -283,6 +289,20 @@ test "aborted sequences restart cleanly" {
         .{ .kind = .dsr_ok, .body = "0" },
         .{ .kind = .dsr_ok, .body = "0" },
     });
+}
+
+test "pendingLoneEsc" {
+    var p: Parser = .{};
+    try testing.expect(!p.pendingLoneEsc());
+    _ = p.feed(0x1b);
+    try testing.expect(p.pendingLoneEsc());
+    _ = p.feed('[');
+    try testing.expect(!p.pendingLoneEsc());
+    _ = p.feed('A');
+    try testing.expect(!p.pendingLoneEsc());
+    _ = p.feed(0x1b);
+    _ = p.feed(0x1b); // ESC ESC: the second restarts, still one ESC held
+    try testing.expect(p.pendingLoneEsc());
 }
 
 test "event helpers" {

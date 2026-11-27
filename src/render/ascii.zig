@@ -79,7 +79,7 @@ pub const Ascii = struct {
     prev: []Cell = &.{},
     /// The rect, fitted box and occluded cells of the previous `present`;
     /// null forces a full redraw.
-    last: ?struct { rect: Rect, box: Rect, occlude: ?Rect } = null,
+    last: ?struct { rect: Rect, box: Rect, occlude: sgr.Occlusion } = null,
     /// The fg last sent in this `present` (as in `Cell.fg`); null: unknown.
     pen: ?u32 = null,
 
@@ -106,11 +106,12 @@ pub const Ascii = struct {
     }
 
     /// Draws `frame` into `rect`, letterboxed to `aspect` (default: the
-    /// frame's own width / height). Cells of the box inside `occlude` are
-    /// left alone (an overlay is drawn there); cells it covered last time and
-    /// no longer does are redrawn even if unchanged. An empty frame or rect
+    /// frame's own width / height). Cells of the box inside any `occlude`
+    /// rect (at most `sgr.max_occlusions`) are left alone (a box is drawn
+    /// there); cells covered last time and no longer are redrawn even if
+    /// unchanged. An empty frame or rect
     /// draws nothing.
-    pub fn present(a: *Ascii, w: *std.Io.Writer, frame: Frame, rect: Rect, aspect: ?f32, occlude: ?Rect) !void {
+    pub fn present(a: *Ascii, w: *std.Io.Writer, frame: Frame, rect: Rect, aspect: ?f32, occlude: []const Rect) !void {
         if (frame.isEmpty() or rect.isEmpty()) return;
         const box = layout.fit(rect, a.cell_px, aspect orelse frame.aspect());
         if (box.isEmpty()) return;
@@ -138,8 +139,8 @@ pub const Ascii = struct {
             var runs: sgr.ChangedRuns(Cell) = .{
                 .new = row,
                 .old = a.prev[yi * box.cols ..][0..box.cols],
-                .force = if (full) .{ 0, box.cols } else sgr.rowSpan(last.?.occlude, box, box.row + y),
-                .skip = sgr.rowSpan(occlude, box, box.row + y),
+                .force = if (full) .one(.{ 0, box.cols }) else .ofRow(last.?.occlude.slice(), box, box.row + y),
+                .skip = .ofRow(occlude, box, box.row + y),
             };
             while (runs.next()) |r| {
                 try a.emitRun(w, box, y, row, r[0], r[1]);
@@ -148,7 +149,7 @@ pub const Ascii = struct {
         }
         if (wrote) try w.writeAll(sgr.reset);
         std.mem.swap([]Cell, &a.cur, &a.prev);
-        a.last = .{ .rect = rect, .box = box, .occlude = occlude };
+        a.last = .{ .rect = rect, .box = box, .occlude = .init(occlude) };
     }
 
     fn cell(a: *const Ascii, c: Rgb) Cell {
@@ -202,7 +203,7 @@ const golden = @import("golden.zig");
 fn render(a: *Ascii, frame: Frame, rect: Rect) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     errdefer aw.deinit();
-    try a.present(&aw.writer, frame, rect, null, null);
+    try a.present(&aw.writer, frame, rect, null, &.{});
     return aw.toOwnedSlice();
 }
 

@@ -1,0 +1,136 @@
+2026-11-27T05:46:52.580Z debug(default): temui 0.0.0 (aarch64-macos-none) args: ["play","~/git/temui/testdata/testcore.rom","--core","~/git/temui/zig-out/lib/temui_test_libretro.dylib","--verbose","--log-file",".local/play-logs/06-rex/basic.log"]
+2026-11-27T05:46:52.580Z debug(term): detect: round 1 answered after 0 ms
+2026-11-27T05:46:52.581Z debug(term): detect: round 2 answered after 0 ms
+2026-11-27T05:46:52.581Z info(term): detect: terminal=rex 0.1.0-preview.19 TERM=xterm-256color TERM_PROGRAM=rex COLORTERM=truecolor da1=true kitty_graphics=true transports_ok={shm=true,file=true,zlib=true} kitty_keyboard=0 truecolor=true cell_px=8x16 (reply) winsize=.{ .cols = 80, .rows = 24, .px_w = 640, .px_h = 384 }
+2026-11-27T05:46:52.581Z info(play): renderer: kitty (auto) transports={ .zlib, .shm, .file } kitty_z=-1073741825 cell_px=8x16
+2026-11-27T05:46:52.581Z info(play): keyboard: kitty (detected), pushing flags 15
+2026-11-27T05:46:52.581Z debug(libretro): environment SET_VARIABLES (16)
+2026-11-27T05:46:52.581Z debug(libretro): environment GET_LOG_INTERFACE (27)
+2026-11-27T05:46:52.581Z debug(libretro): environment GET_VARIABLE (15)
+2026-11-27T05:46:52.581Z debug(libretro): environment SET_PIXEL_FORMAT (10)
+2026-11-27T05:46:52.581Z debug(libretro): environment GET_VARIABLE (15)
+2026-11-27T05:46:52.581Z debug(libretro): environment GET_VARIABLE (15)
+2026-11-27T05:46:52.581Z info(core): temui test core: loaded 72 bytes, crc32 ec8c6999, format xrgb8888
+2026-11-27T05:46:52.581Z info(libretro): loaded temui test core 1 with ~/git/temui/testdata/testcore.rom: 256x224 at 60.000 fps, 48000 Hz, XRGB8888
+2026-11-27T05:46:52.581Z info(play): play: core 60.000 fps, speed 1x, present at most 60.000 fps
+2026-11-27T05:46:52.582Z debug(play): input: "\x1b[?15u\x1b[?62;22c"
+2026-11-27T05:46:53.027Z debug(play): resized to 72x68 cells, cell 15x29 px
+2026-11-27T05:46:53.583Z info(play): stats: emu 60.2 · pres 60.2 · 1× · 460.5 kB/s · enc 91 ms/s · wr 17 ms/s
+2026-11-27T05:46:54.584Z info(play): stats: emu 60.0 · pres 60.0 · 1× · 432.1 kB/s · enc 92 ms/s · wr 20 ms/s
+2026-11-27T05:46:54.769Z debug(play): input: "\x1b[101u"
+2026-11-27T05:46:54.769Z debug(input): key: e
+2026-11-27T05:46:55.583Z info(play): stats: emu 60.0 · pres 60.0 · 1× · 462.0 kB/s · enc 89 ms/s · wr 11 ms/s
+2026-11-27T05:46:55.775Z debug(play): input: "\x1b[101;1:3u"
+2026-11-27T05:46:55.775Z debug(input): key: e (release)
+2026-11-27T05:46:56.054Z debug(play): input: "\x1b[101u"
+2026-11-27T05:46:56.054Z debug(input): key: e
+2026-11-27T05:46:56.078Z debug(play): input: "\x1b[102u"
+2026-11-27T05:46:56.078Z debug(input): key: f
+2026-11-27T05:46:56.583Z info(play): stats: emu 60.0 · pres 60.0 · 1× · 455.7 kB/s · enc 57 ms/s · wr 17 ms/s
+2026-11-27T05:46:56.799Z debug(play): input: "\x1b[101;1:3u"
+2026-11-27T05:46:56.799Z debug(input): key: e (release)
+2026-11-27T05:46:56.821Z debug(play): input: "\x1b[102;1:3u"
+2026-11-27T05:46:56.821Z debug(input): key: f (release)
+2026-11-27T05:46:57.191Z debug(play): input: "\x1b[27u"
+2026-11-27T05:46:57.191Z debug(input): key: escape
+2026-11-27T05:46:57.191Z info(input): mode: tui
+2026-11-27T05:46:57.191Z debug(play): input: "\x1b[27;1:3u"
+2026-11-27T05:46:57.191Z debug(input): key: escape (release)
+2026-11-27T05:46:57.583Z info(play): stats: emu 60.0 · pres 60.0 · 1× · 453.0 kB/s · enc 65 ms/s · wr 17 ms/s
+2026-11-27T05:46:57.828Z debug(play): input: "\x1b[112u"
+2026-11-27T05:46:57.828Z debug(input): key: p
+2026-11-27T05:46:57.828Z debug(input): action: toggle_pause
+2026-11-27T05:46:57.828Z debug(play): input: "\x1b[112;1:3u"
+2026-11-27T05:46:57.828Z debug(input): key: p (release)
+2026-11-27T05:46:58.451Z debug(play): input: "\x1b[46u"
+2026-11-27T05:46:58.451Z debug(input): key: .
+2026-11-27T05:46:58.451Z debug(input): action: step
+2026-11-27T05:46:58.452Z debug(play): input: "\x1b[46;1:3u"
+2026-11-27T05:46:58.452Z debug(input): key: . (release)
+2026-11-27T05:46:58.582Z info(play): stats: emu 16.0 · pres 16.0 · paused · 123.8 kB/s · enc 14 ms/s · wr 2.2 ms/s
+2026-11-27T05:46:58.961Z debug(play): input: "\x1b[112u"
+2026-11-27T05:46:58.961Z debug(input): key: p
+2026-11-27T05:46:58.961Z debug(input): action: toggle_pause
+2026-11-27T05:46:58.962Z debug(play): input: "\x1b[112;1:3u"
+2026-11-27T05:46:58.962Z debug(input): key: p (release)
+2026-11-27T05:46:59.319Z debug(play): input: "\x1b[111u"
+2026-11-27T05:46:59.319Z debug(input): key: o
+2026-11-27T05:46:59.319Z debug(input): action: toggle_stats
+2026-11-27T05:46:59.319Z debug(play): input: "\x1b[111;1:3u"
+2026-11-27T05:46:59.319Z debug(input): key: o (release)
+2026-11-27T05:46:59.581Z info(play): stats: emu 37.0 · pres 37.0 · 1× · 264.4 kB/s · enc 43 ms/s · wr 4.4 ms/s
+2026-11-27T05:46:59.937Z debug(play): input: "\x1b[111u"
+2026-11-27T05:46:59.937Z debug(input): key: o
+2026-11-27T05:46:59.937Z debug(input): action: toggle_stats
+2026-11-27T05:46:59.937Z debug(play): input: "\x1b[111;1:3u"
+2026-11-27T05:46:59.937Z debug(input): key: o (release)
+2026-11-27T05:46:59.960Z debug(play): input: "\x1b[32u"
+2026-11-27T05:46:59.960Z debug(input): key: U+0020
+2026-11-27T05:46:59.960Z info(input): menu opened
+2026-11-27T05:46:59.960Z debug(play): layers: menu true, box false
+2026-11-27T05:46:59.960Z debug(play): input: "\x1b[32;1:3u"
+2026-11-27T05:46:59.960Z debug(input): key: U+0020 (release)
+2026-11-27T05:47:00.566Z debug(play): input: "\x1b[27u"
+2026-11-27T05:47:00.566Z debug(input): key: escape
+2026-11-27T05:47:00.567Z debug(play): input: "\x1b[27;1:3u"
+2026-11-27T05:47:00.567Z debug(input): key: escape (release)
+2026-11-27T05:47:00.581Z info(play): stats: emu 60.0 · pres 60.0 · 1× · 447.3 kB/s · enc 75 ms/s · wr 9.6 ms/s
+2026-11-27T05:47:01.077Z debug(play): input: "\x1b[105u"
+2026-11-27T05:47:01.077Z debug(input): key: i
+2026-11-27T05:47:01.077Z debug(input): action: game
+2026-11-27T05:47:01.077Z info(input): mode: game
+2026-11-27T05:47:01.077Z debug(play): input: "\x1b[105;1:3u"
+2026-11-27T05:47:01.077Z debug(input): key: i (release)
+2026-11-27T05:47:01.574Z debug(play): input: "\x1b[93;5u"
+2026-11-27T05:47:01.574Z debug(input): key: ctrl-]
+2026-11-27T05:47:01.574Z info(input): mode: tui
+2026-11-27T05:47:01.574Z debug(play): input: "\x1b[93;5:3u"
+2026-11-27T05:47:01.574Z debug(input): key: ctrl-] (release)
+2026-11-27T05:47:01.581Z info(play): stats: emu 61.0 · pres 61.0 · 1× · 449.0 kB/s · enc 62 ms/s · wr 7.4 ms/s
+2026-11-27T05:47:02.213Z debug(play): input: "\x1b[13u"
+2026-11-27T05:47:02.213Z debug(input): key: enter
+2026-11-27T05:47:02.213Z info(input): mode: game
+2026-11-27T05:47:02.213Z debug(play): input: "\x1b[13;1:3u"
+2026-11-27T05:47:02.213Z debug(input): key: enter (release)
+2026-11-27T05:47:02.563Z debug(play): input: "\x1b[106u"
+2026-11-27T05:47:02.563Z debug(input): key: j
+2026-11-27T05:47:02.581Z info(play): stats: emu 59.0 · pres 59.0 · 1× · 442.2 kB/s · enc 66 ms/s · wr 6.9 ms/s
+2026-11-27T05:47:02.933Z debug(play): input: "\x1b[93;5u"
+2026-11-27T05:47:02.933Z debug(input): key: ctrl-]
+2026-11-27T05:47:02.933Z info(input): mode: tui
+2026-11-27T05:47:02.933Z debug(play): input: "\x1b[93;5:3u"
+2026-11-27T05:47:02.933Z debug(input): key: ctrl-] (release)
+2026-11-27T05:47:03.556Z debug(play): input: "\x1b[106;1:3u"
+2026-11-27T05:47:03.556Z debug(input): key: j (release)
+2026-11-27T05:47:03.579Z debug(play): input: "\x1b[105u"
+2026-11-27T05:47:03.579Z debug(input): key: i
+2026-11-27T05:47:03.579Z debug(input): action: game
+2026-11-27T05:47:03.579Z info(input): mode: game
+2026-11-27T05:47:03.579Z debug(play): input: "\x1b[105;1:3u"
+2026-11-27T05:47:03.579Z debug(input): key: i (release)
+2026-11-27T05:47:03.581Z info(play): stats: emu 61.0 · pres 61.0 · 1× · 453.4 kB/s · enc 81 ms/s · wr 9.7 ms/s
+2026-11-27T05:47:04.198Z debug(play): input: "\x1b[99;5u"
+2026-11-27T05:47:04.198Z debug(input): key: ctrl-c
+2026-11-27T05:47:04.198Z debug(play): layers: menu false, box true
+2026-11-27T05:47:04.198Z debug(play): input: "\x1b[99;5:3u"
+2026-11-27T05:47:04.198Z debug(input): key: ctrl-c (release)
+2026-11-27T05:47:04.581Z info(play): stats: emu 59.0 · pres 59.0 · 1× · 437.8 kB/s · enc 76 ms/s · wr 10 ms/s
+2026-11-27T05:47:04.828Z debug(play): input: "\x1b[27u\x1b[27;1:3u"
+2026-11-27T05:47:04.828Z debug(input): key: escape
+2026-11-27T05:47:04.828Z info(input): mode: tui
+2026-11-27T05:47:04.828Z debug(input): key: escape (release)
+2026-11-27T05:47:05.445Z debug(play): input: "\x1b[32u\x1b[32;1:3u\x1b[113u\x1b[113;1:3u"
+2026-11-27T05:47:05.445Z debug(input): key: U+0020
+2026-11-27T05:47:05.445Z info(input): menu opened
+2026-11-27T05:47:05.445Z debug(input): key: U+0020 (release)
+2026-11-27T05:47:05.445Z debug(input): key: q
+2026-11-27T05:47:05.445Z debug(input): action: quit
+2026-11-27T05:47:05.445Z info(input): box: quit_prompt
+2026-11-27T05:47:05.445Z debug(input): key: q (release)
+2026-11-27T05:47:05.445Z debug(play): layers: menu false, box true
+2026-11-27T05:47:05.581Z info(play): stats: emu 60.0 · pres 60.0 · 1× · 453.8 kB/s · enc 66 ms/s · wr 7.6 ms/s
+2026-11-27T05:47:06.076Z debug(play): input: "\x1b[13u"
+2026-11-27T05:47:06.076Z debug(input): key: enter
+2026-11-27T05:47:06.076Z info(input): quit confirmed
+2026-11-27T05:47:06.076Z info(play): final stats: emu 61.0 · pres 61.0 · 1× · 447.9 kB/s · enc 78 ms/s · wr 9.7 ms/s
+2026-11-27T05:47:06.076Z info(play): summary: 743 frames in 13.5 s: emu 55.06 fps, presented 55.06 fps

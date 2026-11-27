@@ -7,6 +7,9 @@ pub const Speed = @import("play/Pacer.zig").Speed;
 
 pub const Command = enum { none, help, version, run, detect, play };
 
+/// `play --keyboard`: the input path. Ignored on Windows (console input).
+pub const Keyboard = enum { auto, kitty, legacy };
+
 /// At most this many `--option` flags; parsing stays allocation-free.
 pub const max_core_options = 64;
 
@@ -52,8 +55,12 @@ pub const Play = struct {
     speed: Speed = .normal,
     /// `--present-fps`; null is the core's fps.
     present_fps: ?f64 = null,
+    /// `--overlay`: start with the detailed stats in the status line.
     overlay: bool = false,
     paused: bool = false,
+    keyboard: Keyboard = .auto,
+    /// `--mode-key ctrl-<key>`: the chord's key, lowercase.
+    mode_key: u8 = ']',
     /// `--duration`, in seconds of wall time.
     duration_s: ?f64 = null,
     system_dir: ?[]const u8 = null,
@@ -108,6 +115,10 @@ pub const Error = struct {
         /// `--option`'s `value` is not `key=value` with a non-empty key.
         malformed_option,
         too_many_options,
+        /// `--keyboard`'s `value` is not auto, kitty or legacy.
+        invalid_keyboard,
+        /// `--mode-key`'s `value` is not an allowed Ctrl chord.
+        invalid_mode_key,
     };
 
     pub fn write(e: Error, w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -124,6 +135,8 @@ pub const Error = struct {
             .invalid_positive => try w.print("temui: option '{s}' needs a number from {d} to {d}, got '{s}'\n", .{ e.arg, min_number, max_number, e.value }),
             .malformed_option => try w.print("temui: option '{s}' needs <key>=<value>, got '{s}'\n", .{ e.arg, e.value }),
             .too_many_options => try w.print("temui: too many '{s}' options (at most {d})\n", .{ e.arg, max_core_options }),
+            .invalid_keyboard => try w.print("temui: option '{s}' needs one of auto, kitty, legacy; got '{s}'\n", .{ e.arg, e.value }),
+            .invalid_mode_key => try w.print("temui: option '{s}' needs ctrl-a to ctrl-z, ctrl-], ctrl-\\ or ctrl-^ (not ctrl-c, ctrl-h, ctrl-i, ctrl-j, ctrl-m or ctrl-[); got '{s}'\n", .{ e.arg, e.value }),
         }
         try w.writeAll("Try 'temui --help' for more information.\n");
     }
@@ -135,7 +148,7 @@ pub const Result = union(enum) {
 };
 
 /// Options that take a value, as `--name value` or `--name=value`.
-const Valued = enum { log_file, renderer, core, rom, frames, dump_ppm, dump_every, option, system_dir, save_dir, speed, present_fps, duration };
+const Valued = enum { log_file, renderer, core, rom, frames, dump_ppm, dump_every, option, system_dir, save_dir, speed, present_fps, duration, keyboard, mode_key };
 
 fn valuedName(v: Valued) []const u8 {
     return switch (v) {
@@ -152,6 +165,8 @@ fn valuedName(v: Valued) []const u8 {
         .speed => "--speed",
         .present_fps => "--present-fps",
         .duration => "--duration",
+        .keyboard => "--keyboard",
+        .mode_key => "--mode-key",
     };
 }
 
@@ -191,7 +206,7 @@ fn whereOf(name: []const u8) ?Where {
         .{ "--option", .run_play },      .{ "--system-dir", .run_play }, .{ "--save-dir", .run_play },
         .{ "--speed", .play },           .{ "--present-fps", .play },    .{ "--duration", .play },
         .{ "--overlay", .play },         .{ "--paused", .play },         .{ "--json", .detect },
-        .{ "--renderer", .detect_play },
+        .{ "--renderer", .detect_play }, .{ "--keyboard", .play },       .{ "--mode-key", .play },
     };
     for (table) |e| if (eql(e[0], name)) return e[1];
     return null;
@@ -281,6 +296,10 @@ pub fn parse(args: []const [:0]const u8) Result {
                     const x = parsePositive(value) orelse return .{ .err = .{ .kind = .invalid_positive, .arg = name, .value = value } };
                     if (m.which == .present_fps) opts.play.present_fps = x else opts.play.duration_s = x;
                 },
+                .keyboard => opts.play.keyboard = std.meta.stringToEnum(Keyboard, value) orelse
+                    return .{ .err = .{ .kind = .invalid_keyboard, .arg = name, .value = value } },
+                .mode_key => opts.play.mode_key = parseModeKey(value) orelse
+                    return .{ .err = .{ .kind = .invalid_mode_key, .arg = name, .value = value } },
             }
         } else if (arg.len > 1 and arg[0] == '-') {
             return .{ .err = .{ .kind = .unknown_option, .arg = arg } };
@@ -355,6 +374,19 @@ fn parsePositive(value: []const u8) ?f64 {
     return x;
 }
 
+/// `ctrl-<key>` (any case) → the key, lowercase. Refuses Ctrl-C (quit) and
+/// the chords legacy terminals send as other keys: Ctrl-H (Backspace),
+/// Ctrl-I (Tab), Ctrl-J and Ctrl-M (Enter) and Ctrl-[ (Esc).
+pub fn parseModeKey(value: []const u8) ?u8 {
+    if (value.len != "ctrl-x".len or !std.ascii.startsWithIgnoreCase(value, "ctrl-")) return null;
+    const k = std.ascii.toLower(value[5]);
+    return switch (k) {
+        'c', 'h', 'i', 'j', 'm' => null,
+        'a'...'b', 'd'...'g', 'k'...'l', 'n'...'z', ']', '\\', '^' => k,
+        else => null,
+    };
+}
+
 const Match = struct { which: Valued, inline_value: ?[]const u8 };
 
 /// Recognises `--name` and `--name=value` for every valued option.
@@ -389,16 +421,28 @@ pub fn usage(w: *std.Io.Writer, log_dir: []const u8) std.Io.Writer.Error!void {
         \\      --core <path>       The libretro core to load
         \\      --speed <x>         Starting speed: a multiple such as 0.25 or 4, or max (default 1)
         \\      --present-fps <f>   Draw at most <f> frames per second (default: the core's fps)
-        \\      --overlay           Start with the stats overlay shown
+        \\      --overlay           Start with the detailed stats in the status line
+        \\      --keyboard <mode>   auto (default), kitty or legacy; ignored on Windows
+        \\      --mode-key <chord>  The chord that leaves game mode (default ctrl-]);
+        \\                          ctrl-a to ctrl-z, ctrl-], ctrl-\ or ctrl-^
         \\      --paused            Start paused, showing the first frame
         \\      --duration <s>      Quit after <s> seconds
         \\      --option, --system-dir, --save-dir   As for 'run'
         \\
-        \\Play keys (temporary, until modes arrive):
-        \\  q, Ctrl-C   Quit                 p   Pause / resume
-        \\  .           Step one frame       o   Show / hide the overlay
-        \\  + or =      Faster               -   Slower
-        \\  0           Normal speed
+        \\Play keys: game mode sends keys to the game; the mode key (Esc where the
+        \\terminal reports releases, and Ctrl-] everywhere) switches to TUI mode.
+        \\  Game:  e s d f  Up Left Down Right   l k i j  A B X Y   a ;  L R
+        \\         h  Start   g  Select
+        \\  TUI:   p  Pause / resume       .  Step one frame    o  Detailed stats
+        \\         + or =  Faster          -  Slower            0  Normal speed
+        \\         i, Enter  Back to game  Space  Menu (q: quit)   Esc  Back out
+        \\  Quit:  Space q Enter, or Ctrl-C twice. Stuck: Ctrl-C twice quits (exit 130).
+        \\Game input needs key releases: the kitty keyboard protocol (Ghostty, kitty,
+        \\WezTerm, Rex, foot) or Windows. Elsewhere (tmux, Terminal.app) it is
+        \\disabled and play starts in TUI mode; try --keyboard kitty if detection
+        \\missed the protocol. --keyboard legacy is for automation: each key press
+        \\holds its button for 100 ms; resend to keep holding. A paste is ignored,
+        \\except on Windows, where it arrives as key presses.
         \\
         \\Detect options (show what temui would use in this terminal):
         \\      --json              Print the result as JSON
@@ -654,6 +698,8 @@ test "play: required arguments and defaults" {
     try testing.expect(!p.overlay);
     try testing.expect(!p.paused);
     try testing.expectEqual(null, p.duration_s);
+    try testing.expectEqual(Keyboard.auto, p.keyboard);
+    try testing.expectEqual(@as(u8, ']'), p.mode_key);
     try testing.expectEqual(null, p.system_dir);
     try testing.expectEqual(null, p.save_dir);
     try testing.expectEqual(0, p.options().len);
@@ -713,6 +759,28 @@ test "play: number validation" {
     try expectErr(&.{ "play", "g", "--core", "c", "--speed" }, .missing_value, "--speed");
 }
 
+test "play: --keyboard and --mode-key" {
+    for ([_]struct { [:0]const u8, Keyboard }{ .{ "auto", .auto }, .{ "kitty", .kitty }, .{ "legacy", .legacy } }) |c| {
+        try testing.expectEqual(c[1], (try expectPlay(&.{ "play", "g", "--core", "c", "--keyboard", c[0] })).play.keyboard);
+    }
+    try testing.expectEqual(Keyboard.legacy, (try expectPlay(&.{ "play", "g", "--core", "c", "--keyboard=legacy" })).play.keyboard);
+    for ([_][:0]const u8{ "Kitty", "none", "" }) |bad| {
+        const r = parse(&.{ "play", "g", "--core", "c", "--keyboard", bad });
+        try testing.expect(r == .err);
+        try testing.expectEqual(if (bad.len == 0) Error.Kind.missing_value else .invalid_keyboard, r.err.kind);
+    }
+    for ([_]struct { [:0]const u8, u8 }{
+        .{ "ctrl-]", ']' }, .{ "ctrl-a", 'a' }, .{ "Ctrl-Z", 'z' }, .{ "CTRL-g", 'g' }, .{ "ctrl-\\", '\\' }, .{ "ctrl-^", '^' }, .{ "ctrl-k", 'k' },
+    }) |c| {
+        try testing.expectEqual(c[1], (try expectPlay(&.{ "play", "g", "--core", "c", "--mode-key", c[0] })).play.mode_key);
+    }
+    for ([_][:0]const u8{ "ctrl-c", "ctrl-C", "ctrl-h", "ctrl-i", "ctrl-j", "ctrl-m", "ctrl-[", "ctrl-_", "ctrl-1", "ctrl-", "ctrl-ab", "alt-a", "]", "esc" }) |bad| {
+        try expectErr(&.{ "play", "g", "--core", "c", "--mode-key", bad }, .invalid_mode_key, "--mode-key");
+    }
+    try expectErr(&.{ "--keyboard", "kitty" }, .play_only, "--keyboard");
+    try expectErr(&.{ "detect", "--mode-key=ctrl-a" }, .play_only, "--mode-key");
+}
+
 test "play: usage errors" {
     try expectErr(&.{ "play", "--core", "c" }, .missing_required, "<rom>");
     try expectErr(&.{ "play", "g" }, .missing_required, "--core");
@@ -749,6 +817,8 @@ test "play: error messages" {
         .{ .{ .kind = .detect_only, .arg = "--json" }, "temui: option '--json' is only valid with 'detect'\n" },
         .{ .{ .kind = .invalid_speed, .arg = "--speed", .value = "0" }, "temui: option '--speed' needs a number from 0.001 to 1000000 or 'max', got '0'\n" },
         .{ .{ .kind = .invalid_positive, .arg = "--duration", .value = "x" }, "temui: option '--duration' needs a number from 0.001 to 1000000, got 'x'\n" },
+        .{ .{ .kind = .invalid_keyboard, .arg = "--keyboard", .value = "x" }, "temui: option '--keyboard' needs one of auto, kitty, legacy; got 'x'\n" },
+        .{ .{ .kind = .invalid_mode_key, .arg = "--mode-key", .value = "ctrl-c" }, "temui: option '--mode-key' needs ctrl-a to ctrl-z, ctrl-], ctrl-\\ or ctrl-^ (not ctrl-c, ctrl-h, ctrl-i, ctrl-j, ctrl-m or ctrl-[); got 'ctrl-c'\n" },
     };
     for (cases) |c| {
         var buf: [256]u8 = undefined;
@@ -763,7 +833,7 @@ test "usage documents play" {
     var buf: [8192]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     try usage(&w, "/logs");
-    for ([_][]const u8{ "temui play <rom> --core <path>", "--speed <x>", "--present-fps <f>", "--overlay", "--paused", "--duration <s>", "Play keys (temporary" }) |want| {
+    for ([_][]const u8{ "temui play <rom> --core <path>", "--speed <x>", "--present-fps <f>", "--overlay", "--paused", "--duration <s>", "--keyboard <mode>", "--mode-key <chord>", "Play keys:", "Ctrl-C twice" }) |want| {
         if (std.mem.indexOf(u8, w.buffered(), want) == null) {
             std.debug.print("usage lacks '{s}'\n", .{want});
             return error.TestUnexpectedResult;

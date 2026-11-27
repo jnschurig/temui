@@ -175,7 +175,7 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 - Throughput at 60 fps: measured in 02. Ghostty 1.4.0 and Rex 0.1.0-preview.19 pass 60 fps with every transport, and unpaced every kitty transport reaches 500 fps or more. Rex's reported slow frame rates did not reproduce, so half-block is not Rex's default. kitty, WezTerm, SSH and tmux are not measured; they use the default order until measured. Re-measured through the production renderer in 04 ([results](bench/04-renderers.md)): Ghostty with shm and Rex with zlib hold 60 fps with a p99 frame interval of about 20.5 ms, and temui's own cost is 0.3 and 0.6 ms per frame. Half-block also holds a paced 60 fps, but costs about 10 ms per frame for temui plus the terminal when every cell changes, about 3.5× kitty graphics.
 - Detection: some terminals answer the kitty query but perform poorly. Allow a per-terminal override in config.
 - tmux needs passthrough for kitty graphics (best-effort; half-block works).
-- Overlay over a kitty image (05): each placement carries a z-index, keyed by XTVERSION like the transport order. The default is `-1073741825`, which puts the image below cells with a non-default background, so the overlay's text cells (dark grey background) draw solidly on top. Half-block and ASCII don't emit the overlay's cells at all, and repaint them when it is hidden. Verified in Ghostty 1.4.0 and Rex ([results](bench/05-play-loop.md)). A terminal that ignores the negative z gets `-1` as its per-terminal value; none needs it yet.
+- Boxes over a kitty image (05, extended in 06): each placement carries a z-index, keyed by XTVERSION like the transport order. The default is `-1073741825`, which puts the image below cells with a non-default background, so a box whose every cell has a non-default background (the leader menu and the centered boxes since 06, the stats overlay in 05) draws solidly on top. Half-block and ASCII keep clear of up to four rects at once, and repaint each one's cells when it closes. Verified in Ghostty 1.4.0 and Rex ([results](bench/05-play-loop.md)). A terminal that ignores the negative z gets `-1` as its per-terminal value; none needs it yet.
 
 **Roadmap.** [02-spike-terminal-graphics](roadmap/02-spike-terminal-graphics.md), [04-renderers](roadmap/04-renderers.md), [17-sixel-renderer](roadmap/17-sixel-renderer.md).
 
@@ -206,16 +206,25 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 ## D9: Input — kitty keyboard protocol, Windows console input, SDL3 gamepads
 
 **Decision.**
-- **Keyboard:** the kitty keyboard protocol (press/repeat/release events) where the terminal supports it, and the console input API on Windows. Where key releases aren't reported, a timeout guesses releases and the user sees a warning.
+- **Keyboard:** the kitty keyboard protocol (press/repeat/release events) where the terminal supports it, and the console input API on Windows. **Game input needs release events:** where the terminal doesn't report them, game input is disabled and the rest of the UI still works (revised in 06; the first design guessed releases).
 - **Gamepads:** through SDL3 (gamepad subsystem only, statically linked), mapped to the libretro RetroPad.
 - **Bindings** are configurable.
 - **Sources:** input can come from the attached viewer or from the control socket.
+
+**Implemented in 06.** All three paths decode into one key model (key, modifiers, press/repeat/release). The kitty protocol is pushed with flags 15 (disambiguate, event types, alternate keys, all keys as escapes) on the alternate screen, and popped by the session's pre-built restore string, so a crash pops it too. Windows reads `KEY_EVENT` records with `ENABLE_VIRTUAL_TERMINAL_INPUT` cleared. Focus loss releases every button on every path.
+
+- **Game input disabled** (no release events: tmux, Terminal.app, a detection timeout): `play` starts in TUI mode with a red `GAME MODE DISABLED` flag in the status line. Pause, speed, stats, the menu and quitting all work. TUI keys are decoded from legacy bytes.
+- **Recheck before game mode:** with game input disabled, `i`, Enter and the mode key ask the terminal again: temui pushes flags 15 (or, once pushed, sets them with `CSI = 15 ; 1 u`, so the stack never grows), then sends `CSI ? u` and DA1. Nonzero flags enable game input and enter game mode; zero flags, DA1 alone, or no answer within 2 s show a 3-s notice naming the terminals that work and `--keyboard kitty`. Flags pushed this way are popped on exit too.
+- **Input lost:** with flag 8 a kitty-protocol terminal never sends a key as a plain byte, but one arriving doesn't prove the protocol is gone: the tail of a sequence split across slow reads looks the same. So temui drops it and asks the terminal (`CSI ? u` and a DA1 sentinel); keys in legacy form are dropped until the answer. Flags still set: nothing changes. Zero flags, DA1 alone, or no answer within 2 s: temui releases every button, pauses and shows a modal box, and game input stays disabled until a recheck finds the protocol, so a button can't stick for want of a release.
+- **Fixed hold, for automation only** (`--keyboard legacy`): each press holds its button for 100 ms, and a repeat or resend renews it. Scripts driving a pty get usable game input; people are pointed at a terminal with the protocol. A `LEGACY` flag shows in the status line. Esc isn't the mode key there (see D15).
+- **Bracketed paste** is on during play on every POSIX path and off in the restore string. A paste is discarded, so pasted text never reads as key presses (and, on the kitty path, never as plain bytes that would trip *input lost*). If no pasted byte arrives for 500 ms before the end marker, the paste is ended and logged, so a lost marker can't lock out input. On Windows a paste arrives as ordinary key events.
 
 **Rationale.** Games need held keys, which plain terminal input can't express. The kitty protocol and the Windows console API both report key releases. SDL3's gamepad database handles controller quirks.
 
 **Alternatives rejected.**
 - *Raw OS keyboard hooks (evdev, CGEventTap):* need permissions, and don't work over SSH.
 - *Hand-rolled gamepad support per OS (hidraw / IOKit / XInput):* large surface; SDL3 already solves it.
+- *Guessing releases from auto-repeat* (built first in 06, dropped after the manual run): a tap can't be told from a hold until the terminal's repeat delay has passed (250–800 ms; 660 ms by default on X11), so every tap held its button that long, and only one key can be held at a time, because a terminal repeats only the last key pressed. That is too imprecise for real-time play, and a warning box doesn't make it usable.
 
 **Risks / open questions.**
 - The SDL3 gamepad-only static build on all six targets. → 15.
@@ -278,7 +287,7 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 
 ## D13: Observability — file logs, optional stats overlay
 
-**Decision.** Log to a file, never to the TUI's stdout. `--verbose` raises the log level. An optional overlay shows emulation fps, presented fps, and bytes/s written to the terminal.
+**Decision.** Log to a file, never to the TUI's stdout. `--verbose` raises the log level. A status line on the bottom row, outside the image, always shows the emulated fps and speed; detailed stats (presented fps, bytes/s, encode and write time, lag) are toggled into its center segment (`o`, `--overlay`). Since 06 this replaces 05's overlay drawn over the image.
 
 **Rationale.** stdout carries the terminal graphics, so writing logs there would corrupt the display. The overlay's numbers are the ones that matter when tuning renderer performance.
 
@@ -315,7 +324,12 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 
 **Decision.**
 - **Game mode:** all input goes to the focused (primary) instance. A later item lets game mode attach to N instances and send the same input to all of them at once.
-- **Leaving game mode:** a leader key switches to TUI mode. The default is Esc when the kitty keyboard protocol is active; otherwise a configurable Ctrl key, because without the protocol a plain Esc can't be told apart from the start of another key's escape code.
+- **The vim model (06):** game mode is insert mode, TUI mode is normal mode.
+  - The **mode key** leaves game mode: Esc where a lone Esc is unambiguous (the kitty keyboard protocol, Windows console input), and a Ctrl chord on every path, Ctrl-] by default (`--mode-key`, config in 10). Without the protocol a plain Esc can't be told apart from the start of another key's escape code, so it does nothing in game mode there.
+  - The **leader** is Space, in TUI mode only, and opens a which-key menu listing the TUI keys plus `q` quit. Item 08 extends the menu.
+  - **Esc only backs out** one layer (quit prompt, then menu); with nothing open it does nothing.
+  - **TUI mode keeps the game running**, with every button released on entry. A key held through the return to game mode acts only once pressed again.
+  - **Quitting always needs a confirmation**, since nothing is saved yet: Space `q` then Enter, or a second Ctrl-C within 3 s (the first shows a transient prompt and keys keep working). A watchdog thread quits at once on two Ctrl-Cs when the loop has been outside its event wait for ≥ 1 s (a stuck core or a blocked terminal write): best-effort restore, a stderr line, `_exit(130)`.
 - **TUI mode:** vim-style keys. `h`/`j`/`k`/`l` = left/down/up/right, `?` = help, `/` = search, plus Enter and arrow-key equivalents.
 - **Launch:** `temui` with no arguments opens a ROM browser over the configured ROM directories, with search, and launches the selected ROM.
 - **Game control mapping** (keyboard/gamepad → RetroPad, per-system defaults, remapping) is its own roadmap item.
@@ -327,7 +341,8 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 - *A non-modal UI:* can't give a game full use of the keyboard.
 
 **Risks / open questions.**
-- The default fallback leader key must not clash with common terminal or tmux bindings (Ctrl-B, Ctrl-A). → 06.
+- ~~The default fallback leader key must not clash with common terminal or tmux bindings (Ctrl-B, Ctrl-A).~~ **Closed in 06:** Ctrl-] (telnet's escape, unbound in tmux and common terminals), changeable with `--mode-key`. On some non-US layouts it is awkward to type; the README says so.
+- Quit prompts guard against losing progress. If 10 adds a resume save state on quit, they could be relaxed.
 
 **Roadmap.** [06-keyboard-input-and-modes](roadmap/06-keyboard-input-and-modes.md), [08-tui-shell-and-rom-browser](roadmap/08-tui-shell-and-rom-browser.md), [11-game-control-mapping](roadmap/11-game-control-mapping.md), [14-grid-and-command-palette](roadmap/14-grid-and-command-palette.md), [22-multi-instance-input-broadcast](roadmap/22-multi-instance-input-broadcast.md).
 
@@ -338,7 +353,7 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 | Tier | Terminals | Renderer | Input |
 |---|---|---|---|
 | 1 — full | kitty, Ghostty, WezTerm, Rex | kitty graphics, double-buffered; shm → file → inline zlib (inline zlib first in Rex) | kitty keyboard protocol |
-| 2 — truecolor | any truecolor terminal (incl. Windows Terminal) | half-block | kitty protocol if present; otherwise timeout-guessed key releases, or the Windows console API |
+| 2 — truecolor | any truecolor terminal (incl. Windows Terminal) | half-block | kitty protocol if present, or the Windows console API; otherwise game input is disabled (TUI keys only) |
 | 3 — basic | anything else | ASCII | as tier 2 |
 
 tmux is best-effort: kitty graphics needs `allow-passthrough`, and half-block works.

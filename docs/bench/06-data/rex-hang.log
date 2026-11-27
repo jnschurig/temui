@@ -1,0 +1,17 @@
+2026-11-27T05:47:32.705Z debug(default): temui 0.0.0 (aarch64-macos-none) args: ["play","~/git/temui/testdata/testcore.rom","--core","~/git/temui/zig-out/lib/temui_test_libretro.dylib","--verbose","--log-file",".local/play-logs/06-rex/hang.log","--option","temui_test_hang_after=60"]
+2026-11-27T05:47:32.705Z debug(term): detect: round 1 answered after 0 ms
+2026-11-27T05:47:32.705Z debug(term): detect: round 2 answered after 0 ms
+2026-11-27T05:47:32.706Z info(term): detect: terminal=rex 0.1.0-preview.19 TERM=xterm-256color TERM_PROGRAM=rex COLORTERM=truecolor da1=true kitty_graphics=true transports_ok={shm=true,file=true,zlib=true} kitty_keyboard=0 truecolor=true cell_px=8x16 (reply) winsize=.{ .cols = 80, .rows = 24, .px_w = 640, .px_h = 384 }
+2026-11-27T05:47:32.706Z info(play): renderer: kitty (auto) transports={ .zlib, .shm, .file } kitty_z=-1073741825 cell_px=8x16
+2026-11-27T05:47:32.706Z info(play): keyboard: kitty (detected), pushing flags 15
+2026-11-27T05:47:32.706Z debug(libretro): environment SET_VARIABLES (16)
+2026-11-27T05:47:32.706Z debug(libretro): environment GET_LOG_INTERFACE (27)
+2026-11-27T05:47:32.706Z debug(libretro): environment GET_VARIABLE (15)
+2026-11-27T05:47:32.706Z debug(libretro): environment SET_PIXEL_FORMAT (10)
+2026-11-27T05:47:32.706Z debug(libretro): environment GET_VARIABLE (15)
+2026-11-27T05:47:32.706Z debug(libretro): environment GET_VARIABLE (15)
+2026-11-27T05:47:32.706Z info(core): temui test core: loaded 72 bytes, crc32 ec8c6999, format xrgb8888
+2026-11-27T05:47:32.706Z info(libretro): loaded temui test core 1 with ~/git/temui/testdata/testcore.rom: 256x224 at 60.000 fps, 48000 Hz, XRGB8888
+2026-11-27T05:47:32.706Z info(play): play: core 60.000 fps, speed 1x, present at most 60.000 fps
+2026-11-27T05:47:32.707Z debug(play): input: "\x1b[?15u\x1b[?62;22c"
+2026-11-27T05:47:33.160Z debug(play): resized to 72x68 cells, cell 15x29 px

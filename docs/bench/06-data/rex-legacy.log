@@ -1,0 +1,38 @@
+2026-11-27T05:47:27.984Z debug(default): temui 0.0.0 (aarch64-macos-none) args: ["play","~/git/temui/testdata/testcore.rom","--core","~/git/temui/zig-out/lib/temui_test_libretro.dylib","--verbose","--log-file",".local/play-logs/06-rex/legacy.log","--keyboard","legacy"]
+2026-11-27T05:47:27.985Z debug(term): detect: round 1 answered after 0 ms
+2026-11-27T05:47:27.985Z debug(term): detect: round 2 answered after 0 ms
+2026-11-27T05:47:27.985Z info(term): detect: terminal=rex 0.1.0-preview.19 TERM=xterm-256color TERM_PROGRAM=rex COLORTERM=truecolor da1=true kitty_graphics=true transports_ok={shm=true,file=true,zlib=true} kitty_keyboard=0 truecolor=true cell_px=8x16 (reply) winsize=.{ .cols = 80, .rows = 24, .px_w = 640, .px_h = 384 }
+2026-11-27T05:47:27.985Z info(play): renderer: kitty (auto) transports={ .zlib, .shm, .file } kitty_z=-1073741825 cell_px=8x16
+2026-11-27T05:47:27.985Z info(play): keyboard: legacy (--keyboard, fixed 100 ms hold)
+2026-11-27T05:47:27.986Z debug(libretro): environment SET_VARIABLES (16)
+2026-11-27T05:47:27.986Z debug(libretro): environment GET_LOG_INTERFACE (27)
+2026-11-27T05:47:27.986Z debug(libretro): environment GET_VARIABLE (15)
+2026-11-27T05:47:27.986Z debug(libretro): environment SET_PIXEL_FORMAT (10)
+2026-11-27T05:47:27.986Z debug(libretro): environment GET_VARIABLE (15)
+2026-11-27T05:47:27.986Z debug(libretro): environment GET_VARIABLE (15)
+2026-11-27T05:47:27.986Z info(core): temui test core: loaded 72 bytes, crc32 ec8c6999, format xrgb8888
+2026-11-27T05:47:27.986Z info(libretro): loaded temui test core 1 with ~/git/temui/testdata/testcore.rom: 256x224 at 60.000 fps, 48000 Hz, XRGB8888
+2026-11-27T05:47:27.986Z info(play): play: core 60.000 fps, speed 1x, present at most 60.000 fps
+2026-11-27T05:47:28.432Z debug(play): resized to 72x68 cells, cell 15x29 px
+2026-11-27T05:47:28.988Z info(play): stats: emu 60.5 · pres 60.5 · 1× · 462.6 kB/s · enc 109 ms/s · wr 13 ms/s
+2026-11-27T05:47:29.988Z info(play): stats: emu 60.0 · pres 60.0 · 1× · 432.1 kB/s · enc 87 ms/s · wr 20 ms/s
+2026-11-27T05:47:30.182Z debug(play): input: "e"
+2026-11-27T05:47:30.182Z debug(input): key: e
+2026-11-27T05:47:30.880Z debug(play): input: "\x1d"
+2026-11-27T05:47:30.880Z debug(input): key: ctrl-]
+2026-11-27T05:47:30.880Z info(input): mode: tui
+2026-11-27T05:47:30.987Z info(play): stats: emu 60.0 · pres 60.0 · 1× · 453.0 kB/s · enc 52 ms/s · wr 5.7 ms/s
+2026-11-27T05:47:31.473Z debug(play): input: " "
+2026-11-27T05:47:31.473Z debug(input): key: U+0020
+2026-11-27T05:47:31.473Z info(input): menu opened
+2026-11-27T05:47:31.473Z debug(play): layers: menu true, box false
+2026-11-27T05:47:31.473Z debug(play): input: "q"
+2026-11-27T05:47:31.473Z debug(input): key: q
+2026-11-27T05:47:31.473Z debug(input): action: quit
+2026-11-27T05:47:31.473Z info(input): box: quit_prompt
+2026-11-27T05:47:31.473Z debug(play): layers: menu false, box true
+2026-11-27T05:47:31.473Z debug(play): input: "\x0d"
+2026-11-27T05:47:31.473Z debug(input): key: enter
+2026-11-27T05:47:31.473Z info(input): quit confirmed
+2026-11-27T05:47:31.473Z info(play): final stats: emu 60.0 · pres 60.0 · 1× · 452.5 kB/s · enc 64 ms/s · wr 8.6 ms/s
+2026-11-27T05:47:31.473Z info(play): summary: 210 frames in 3.5 s: emu 60.21 fps, presented 60.21 fps

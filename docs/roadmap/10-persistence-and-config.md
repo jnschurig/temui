@@ -7,7 +7,7 @@ Game saves survive restarts, save states work, and settings live in a config fil
 
 ## Context
 - D11 — SRAM autosave; numbered save-state slots; platform config paths; the config format is chosen in this cycle.
-- D15 — the leader key is configurable.
+- D15 — the mode key is configurable (06 added `--mode-key` as a stand-in).
 - D7 — per-terminal renderer override belongs in config.
 
 ## In scope
@@ -15,7 +15,7 @@ Game saves survive restarts, save states work, and settings live in a config fil
 - Save-state slots: save, load, select slot; files named per ROM and slot.
 - Platform paths: XDG on Linux, Application Support on macOS, AppData on Windows; for config, saves, and states.
 - Choose the config format and write the loader with validation and clear error messages.
-- Config keys: ROM directories, leader key, renderer override, default speed and presentation fps, log level.
+- Config keys: ROM directories, the mode key (06's `--mode-key`), renderer override, default speed and presentation fps, log level, and the status line's segment layout (06 builds it from component lists for this).
 
 ## Out of scope
 - Control mappings in config (item 11, which builds on this loader).
@@ -30,7 +30,7 @@ Game saves survive restarts, save states work, and settings live in a config fil
 
 ## Depends on
 - [05](./05-play-loop.md) — the running game and core host.
-- [06](./06-keyboard-input-and-modes.md) — the leader key.
+- [06](./06-keyboard-input-and-modes.md) — the mode key and the status line.
 - [08](./08-tui-shell-and-rom-browser.md) — the ROM browser that reads ROM directories.
 
 ## Open questions for the cycle's interview
@@ -38,3 +38,4 @@ Game saves survive restarts, save states work, and settings live in a config fil
 - Autosave interval, and whether to keep a backup of the previous SRAM file.
 - Save-state format: raw `retro_serialize` output plus a header (core name, version, ROM hash)? Thumbnails?
 - Should save files live next to ROMs as an option?
+- Should quitting write a resume save state that the next `play` of the same ROM loads? If so, 06's quit confirmations (Space `q` Enter, double Ctrl-C) could be relaxed.

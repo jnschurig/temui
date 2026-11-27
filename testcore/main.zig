@@ -10,6 +10,9 @@
 //! - Stdout: with the core option `temui_test_stdout_marker=on` (default off),
 //!   prints `stdout_marker` with C stdio on load, as real cores do (D13). Off
 //!   by default: in-process tests share the test runner's stdout, its IPC.
+//! - Hang: with the core option `temui_test_hang_after=<frames>` (default 0,
+//!   off), `retro_run` sleeps forever once that many frames have run, so the
+//!   watchdog can be tested against a stuck core.
 //! - Content: required; its CRC32 selects the colour-bar rotation and is shown
 //!   as a 32-bit strip.
 //!
@@ -29,8 +32,17 @@ pub const sram_size = 8192;
 pub const option_key = "temui_test_pixel_format";
 pub const marker_key = "temui_test_stdout_marker";
 pub const stdout_marker = "temui test core: stdout marker";
+pub const hang_key = "temui_test_hang_after";
 
 extern "c" fn puts(s: [*:0]const u8) c_int;
+extern "c" fn usleep(us: c_uint) c_int;
+extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
+
+fn sleepForever() noreturn {
+    while (true) {
+        if (@import("builtin").os.tag == .windows) Sleep(100) else _ = usleep(100_000);
+    }
+}
 
 const tone_hz = 440;
 /// Phase step per sample in 2^32 units per cycle.
@@ -69,6 +81,8 @@ const Game = struct {
     format: Format,
     seed: u32,
     frame: u32,
+    /// 0: never hang.
+    hang_after: u32,
     phase: u32,
     sram: [sram_size]u8,
 };
@@ -81,7 +95,7 @@ const save_version: u8 = 1;
 const save_size = 1 + 4 + 4 + 4 + sram_size;
 
 fn resetGame() void {
-    game = .{ .loaded = false, .format = .xrgb8888, .seed = 0, .frame = 0, .phase = 0, .sram = @splat(0) };
+    game = .{ .loaded = false, .format = .xrgb8888, .seed = 0, .frame = 0, .hang_after = 0, .phase = 0, .sram = @splat(0) };
 }
 
 fn env(cmd: c_int, data: ?*anyopaque) bool {
@@ -106,6 +120,7 @@ export fn retro_set_environment(f: c.retro_environment_t) void {
     const vars = [_]c.struct_retro_variable{
         .{ .key = option_key, .value = "Pixel format; xrgb8888|rgb565|0rgb1555" },
         .{ .key = marker_key, .value = "Print a marker on stdout at load; off|on" },
+        .{ .key = hang_key, .value = "Hang forever after N frames (0 = never); 0|1|30|60|300" },
         .{ .key = null, .value = null },
     };
     _ = env(c.RETRO_ENVIRONMENT_SET_VARIABLES, @ptrCast(@constCast(&vars)));
@@ -210,6 +225,10 @@ export fn retro_load_game(info: ?*const c.struct_retro_game_info) bool {
     if (env(c.RETRO_ENVIRONMENT_GET_VARIABLE, &m) and m.value != null and std.mem.eql(u8, std.mem.span(m.value), "on")) {
         _ = puts(stdout_marker);
     }
+    var h: c.struct_retro_variable = .{ .key = hang_key, .value = null };
+    if (env(c.RETRO_ENVIRONMENT_GET_VARIABLE, &h) and h.value != null) {
+        game.hang_after = std.fmt.parseInt(u32, std.mem.span(h.value), 10) catch 0;
+    }
     game.loaded = true;
     log(c.RETRO_LOG_INFO, "temui test core: loaded %u bytes, crc32 %08x, format %s\n", .{
         @as(c_uint, @intCast(data.len)),
@@ -236,6 +255,7 @@ export fn retro_get_region() c_uint {
 
 export fn retro_run() void {
     if (!game.loaded) return;
+    if (game.hang_after != 0 and game.frame >= game.hang_after) sleepForever();
     if (cb.input_poll) |f| f();
     var buttons: u16 = 0;
     if (cb.input_state) |f| {
