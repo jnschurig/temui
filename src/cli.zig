@@ -437,8 +437,12 @@ pub fn usage(w: *std.Io.Writer, log_dir: []const u8) std.Io.Writer.Error!void {
         \\         + or =  Faster          -  Slower            0  Normal speed
         \\         i, Enter  Back to game  Space  Menu (q: quit)   Esc  Back out
         \\  Quit:  Space q Enter, or Ctrl-C twice. Stuck: Ctrl-C twice quits (exit 130).
-        \\Without the kitty keyboard protocol (or --keyboard legacy), releases are
-        \\guessed from auto-repeat: taps last up to 0.5 s, one key held at a time.
+        \\Game input needs key releases: the kitty keyboard protocol (Ghostty, kitty,
+        \\WezTerm, Rex, foot) or Windows. Elsewhere (tmux, Terminal.app) it is
+        \\disabled and play starts in TUI mode; try --keyboard kitty if detection
+        \\missed the protocol. --keyboard legacy is for automation: each key press
+        \\holds its button for 100 ms; resend to keep holding. A paste is ignored,
+        \\except on Windows, where it arrives as key presses.
         \\
         \\Detect options (show what temui would use in this terminal):
         \\      --json              Print the result as JSON

@@ -20,7 +20,7 @@ Spike items (02, and the spikes inside 07, 12 and 15) exist to retire risks befo
 | 03 | [libretro host and test core](roadmap/03-libretro-host-and-test-core.md) | MVP | 01 | ☑ 2026-11-24 |
 | 04 | [Renderers](roadmap/04-renderers.md) | MVP | 02, 03 | ☑ 2026-11-24 |
 | 05 | [Play loop](roadmap/05-play-loop.md) | MVP | 03, 04 | ☑ 2026-11-25 |
-| 06 | [Keyboard input and modes](roadmap/06-keyboard-input-and-modes.md) | MVP | 05 | ☐ |
+| 06 | [Keyboard input and modes](roadmap/06-keyboard-input-and-modes.md) | MVP | 05 | ☑ 2026-11-27 |
 | 07 | [Core acquisition](roadmap/07-core-acquisition.md) | MVP | 01, 03 | ☐ |
 | 08 | [TUI shell and ROM browser](roadmap/08-tui-shell-and-rom-browser.md) | MVP | 05, 06, 07 | ☐ |
 | 09 | [Audio](roadmap/09-audio.md) | MVP | 05 | ☐ |

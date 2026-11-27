@@ -206,21 +206,24 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 ## D9: Input — kitty keyboard protocol, Windows console input, SDL3 gamepads
 
 **Decision.**
-- **Keyboard:** the kitty keyboard protocol (press/repeat/release events) where the terminal supports it, and the console input API on Windows. Where key releases aren't reported, a timeout guesses releases and the user sees a warning.
+- **Keyboard:** the kitty keyboard protocol (press/repeat/release events) where the terminal supports it, and the console input API on Windows. **Game input needs release events:** where the terminal doesn't report them, game input is disabled and the rest of the UI still works (revised in 06; the first design guessed releases).
 - **Gamepads:** through SDL3 (gamepad subsystem only, statically linked), mapped to the libretro RetroPad.
 - **Bindings** are configurable.
 - **Sources:** input can come from the attached viewer or from the control socket.
 
 **Implemented in 06.** All three paths decode into one key model (key, modifiers, press/repeat/release). The kitty protocol is pushed with flags 15 (disambiguate, event types, alternate keys, all keys as escapes) on the alternate screen, and popped by the session's pre-built restore string, so a crash pops it too. Windows reads `KEY_EVENT` records with `ENABLE_VIRTUAL_TERMINAL_INPUT` cleared. Focus loss releases every button on every path.
 
-- **Legacy path** (no release events: tmux, Terminal.app, `--keyboard legacy`): releases are guessed from auto-repeat. A press holds its button for an *initial window* (500 ms, then learned as 1.2 × the median press-to-first-repeat gap, clamped to 250–800 ms; a delay longer than the window shows up as a tap, then a new press with quick repeats, and is learned from the gap since the tap); repeats renew it, and it is released 2.5 × the repeat interval after the last one (clamped to 50–200 ms). Limitations, shown in a modal box at start: a tap lasts up to the initial window, and only one key can be held at a time, since terminals repeat only the last key pressed. Esc isn't the mode key there (see D15).
-- **Automatic fallback:** with flag 8 a kitty-protocol terminal never sends a key as a plain byte, so one arriving (after the push is acknowledged via `CSI ? u` and a DA1 sentinel) switches the run to the legacy path, with the warning, so buttons can't stick for want of releases.
+- **Game input disabled** (no release events: tmux, Terminal.app, a detection timeout): `play` starts in TUI mode with a red `GAME MODE DISABLED` flag in the status line, and `i`, Enter and the mode key show a 3-s notice naming the terminals that work and `--keyboard kitty`. Pause, speed, stats, the menu and quitting all work. TUI keys are decoded from legacy bytes.
+- **Input lost:** with flag 8 a kitty-protocol terminal never sends a key as a plain byte, so one arriving (after the push is acknowledged via `CSI ? u` and a DA1 sentinel) means the protocol is gone. temui releases every button, pauses, shows a modal box, and stays disabled for the rest of the run, so a button can't stick for want of a release.
+- **Fixed hold, for automation only** (`--keyboard legacy`): each press holds its button for 100 ms, and a repeat or resend renews it. Scripts driving a pty get usable game input; people are pointed at a terminal with the protocol. A `LEGACY` flag shows in the status line. Esc isn't the mode key there (see D15).
+- **Bracketed paste** is on during play on every POSIX path and off in the restore string. A paste is discarded, so pasted text never reads as key presses (and, on the kitty path, never as plain bytes that would trip *input lost*). If no pasted byte arrives for 500 ms before the end marker, the paste is ended and logged, so a lost marker can't lock out input. On Windows a paste arrives as ordinary key events.
 
 **Rationale.** Games need held keys, which plain terminal input can't express. The kitty protocol and the Windows console API both report key releases. SDL3's gamepad database handles controller quirks.
 
 **Alternatives rejected.**
 - *Raw OS keyboard hooks (evdev, CGEventTap):* need permissions, and don't work over SSH.
 - *Hand-rolled gamepad support per OS (hidraw / IOKit / XInput):* large surface; SDL3 already solves it.
+- *Guessing releases from auto-repeat* (built first in 06, dropped after the manual run): a tap can't be told from a hold until the terminal's repeat delay has passed (250–800 ms; 660 ms by default on X11), so every tap held its button that long, and only one key can be held at a time, because a terminal repeats only the last key pressed. That is too imprecise for real-time play, and a warning box doesn't make it usable.
 
 **Risks / open questions.**
 - The SDL3 gamepad-only static build on all six targets. → 15.
@@ -349,7 +352,7 @@ Sixel and iTerm2 protocols are deferred, so Windows Terminal gets half-block or 
 | Tier | Terminals | Renderer | Input |
 |---|---|---|---|
 | 1 — full | kitty, Ghostty, WezTerm, Rex | kitty graphics, double-buffered; shm → file → inline zlib (inline zlib first in Rex) | kitty keyboard protocol |
-| 2 — truecolor | any truecolor terminal (incl. Windows Terminal) | half-block | kitty protocol if present; otherwise timeout-guessed key releases, or the Windows console API |
+| 2 — truecolor | any truecolor terminal (incl. Windows Terminal) | half-block | kitty protocol if present, or the Windows console API; otherwise game input is disabled (TUI keys only) |
 | 3 — basic | anything else | ASCII | as tier 2 |
 
 tmux is best-effort: kitty graphics needs `allow-passthrough`, and half-block works.

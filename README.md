@@ -63,11 +63,11 @@ temui play testdata/testcore.rom --core zig-out/lib/temui_test_libretro.dylib --
 | `--paused` | Start paused, showing the first frame |
 | `--duration <s>` | Quit after `<s>` seconds |
 | `--renderer <name>` | `kitty`, `halfblock`, `ascii` or `auto` (default) |
-| `--keyboard <path>` | `auto` (default: the kitty keyboard protocol if the terminal reports it, else legacy), `kitty` (push the protocol even if detection didn't see it) or `legacy`. Ignored on Windows, which always uses console input |
+| `--keyboard <path>` | `auto` (default: the kitty keyboard protocol if the terminal reports it, else game input is disabled), `kitty` (push the protocol even if detection didn't see it) or `legacy` (game input without releases, for automation: see below). Ignored on Windows, which always uses console input |
 | `--mode-key <chord>` | The chord that leaves game mode (default `ctrl-]`): `ctrl-a`…`ctrl-z`, `ctrl-]`, `ctrl-\` or `ctrl-^`, except `ctrl-c`, `ctrl-h`, `ctrl-i`, `ctrl-j` and `ctrl-m` |
 | `--option`, `--system-dir`, `--save-dir` | As for `run` |
 
-The bottom row is a status line: the mode (`GAME` or `TUI`, plus `LEGACY` on the legacy input path), the ROM and core (or the detailed stats, toggled with `o`), and the emulated fps and speed.
+The bottom row is a status line: the mode (`GAME` or `TUI`, plus a flag: `LEGACY` with `--keyboard legacy`, or `GAME MODE DISABLED` in white on red), the ROM and core (or the detailed stats, toggled with `o`), and the emulated fps and speed.
 
 ### Keys
 
@@ -98,9 +98,13 @@ TUI mode:
 
 Quitting always asks first, because nothing is saved yet: Space `q` then Enter, or Ctrl-C twice within 3 s from anywhere (the first shows a prompt; the game keeps running meanwhile). If temui stops responding (a core stuck in a loop, or a terminal that stopped reading), two Ctrl-Cs quit at once with exit code 130.
 
-**Without the kitty keyboard protocol** (tmux, Terminal.app, or `--keyboard legacy`), the terminal reports key presses but not releases, so temui guesses them from auto-repeat, and says so in a box at start. A tap holds its button for about your key repeat delay (half a second until it is learned, at most 0.8 s), and only one key can be held at a time, because a terminal repeats only the last key pressed. Esc isn't the mode key on this path; use Ctrl-]. If the protocol was expected but keys arrive in legacy form anyway, temui switches to guessing for the rest of the run.
+**Game input needs key releases.** Holding a button means knowing when the key goes up, and only the [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/) (Ghostty, kitty, WezTerm, Rex, foot) and the Windows console report releases. Elsewhere (tmux, Terminal.app, a terminal reached over a slow link) game input is **disabled**: `play` starts in TUI mode with a red `GAME MODE DISABLED` flag, and `i`, Enter and the mode key show a notice instead of entering game mode. Everything else (pause, speed, stats, the menu, quitting) works. If your terminal has the protocol but detection missed it, try `--keyboard kitty`. If the protocol stops working mid-game (keys start arriving without releases), temui releases every button, pauses, and says so in a box; it stays disabled for the rest of the run.
 
-Holding keys and releasing them was verified in Ghostty and Rex ([results](docs/bench/06-keyboard.md)); kitty and WezTerm are covered by recorded-sequence tests only.
+**`--keyboard legacy`** is for automation, such as scripted key presses into a pty: game input works without releases, each key press holding its button for a fixed 100 ms. To keep holding, resend the key within 100 ms (a held key's auto-repeat does this, but only for the last key pressed, and only after the repeat delay). A `LEGACY` flag shows in the status line. Esc isn't the mode key on this path; use Ctrl-].
+
+**Pasting** does nothing on macOS and Linux: temui turns on bracketed paste and discards whatever is pasted, so pasted text never reads as key presses. On Windows a paste arrives as ordinary key events and does act on the game.
+
+Holding and releasing keys was verified in Ghostty and Rex, and game input disabled in Terminal.app and under GNU screen ([results](docs/bench/06-keyboard.md)). kitty and WezTerm are covered by the protocol tests only.
 
 On exit temui prints one summary line (`N frames in S s: emu X fps, presented Y fps`). Resizing the terminal refits the picture. Anything a core prints to stdout or stderr goes to the log (as `core: stdio: …`), never to the screen; snes9x, for example, prints `Map_HiROMMap` while loading a HiROM game. Pacing and decoupling were measured in Ghostty and Rex: see [the verification results](docs/bench/05-play-loop.md).
 

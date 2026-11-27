@@ -623,6 +623,78 @@ test "kitty: late detection replies are swallowed" {
     });
 }
 
+// Recorded from Rex 0.1.0-preview.19 with flags 15 pushed (roadmap 06 manual
+// run, `docs/bench/06-keyboard.md`): the reads logged by `play --verbose`
+// while `rex send-key` pressed and released keys, in order.
+test "recorded: Rex, kitty flags 15" {
+    try expectDecode(.kitty, "\x1b[?15u\x1b[?62;22c" ++ // detection replies
+        "\x1b[101u\x1b[101;1:3u" ++ // e
+        "\x1b[27u\x1b[27;1:3u" ++ // Esc
+        "\x1b[46u\x1b[46;1:3u" ++ // .
+        "\x1b[93;5u\x1b[93;5:3u" ++ // Ctrl-]
+        "\x1b[13u\x1b[13;1:3u" ++ // Enter
+        "\x1b[99;5u\x1b[99;5:3u" ++ // Ctrl-C
+        "\x1b[32u\x1b[32;1:3u\x1b[113u\x1b[113;1:3u" ++ // Space q, one read
+        "\x1b[O\x1b[O\x1b[I", // focus out twice, then in
+        &.{
+            key(ch('e'), none, .press),     key(ch('e'), none, .release),
+            key(nm(.escape), none, .press), key(nm(.escape), none, .release),
+            key(ch('.'), none, .press),     key(ch('.'), none, .release),
+            key(ch(']'), ctrl, .press),     key(ch(']'), ctrl, .release),
+            key(nm(.enter), none, .press),  key(nm(.enter), none, .release),
+            key(ch('c'), ctrl, .press),     key(ch('c'), ctrl, .release),
+            key(ch(' '), none, .press),     key(ch(' '), none, .release),
+            key(ch('q'), none, .press),     key(ch('q'), none, .release),
+            .{ .focus = false },            .{ .focus = false },
+            .{ .focus = true },
+        });
+}
+
+// Recorded from Ghostty 1.4.0 with flags 15 pushed (same run): reads as
+// logged, including several events in one read.
+test "recorded: Ghostty, kitty flags 15" {
+    try expectDecode(.kitty, "\x1b[I\x1b[?15u\x1b[?62;22;52c" ++ // focus in, detection replies
+        "\x1b[101u\x1b[101;1:3u" ++ // e
+        "\x1b[102;1:2u\x1b[107u" ++ // f repeating, k pressed, one read
+        "\x1b[106;5:2u" ++ // Ctrl-j repeating
+        "\x1b[57441;2u\x1b[92:124;2u\x1b[92;2:3u\x1b[57441;1:3u" ++ // Shift-\ gives |
+        "\x1b[57448;5u\x1b[93;5u\x1b[93;5:3u" ++ // right Ctrl, Ctrl-]
+        "\x1b[57448;1:3u\x1b[O" ++ // right Ctrl up, then focus out (Cmd-Tab), one read
+        "\x1b[99;5u\x1b[99;5:3u" ++ // Ctrl-C
+        "\x1b[200~printf '\\033[<u' > /dev/ttys008\x1b[201~", // a paste, discarded
+        &.{
+            .{ .focus = true },
+            key(ch('e'), none, .press),
+            key(ch('e'), none, .release),
+            key(ch('f'), none, .repeat),
+            key(ch('k'), none, .press),
+            key(ch('j'), ctrl, .repeat),
+            key(nm(.left_shift), shift, .press),
+            .{ .key = .{ .key = ch('\\'), .shifted = '|', .mods = shift } },
+            key(ch('\\'), shift, .release),
+            key(nm(.left_shift), none, .release),
+            key(nm(.right_ctrl), ctrl, .press),
+            key(ch(']'), ctrl, .press),
+            key(ch(']'), ctrl, .release),
+            key(nm(.right_ctrl), none, .release),
+            .{ .focus = false },
+            key(ch('c'), ctrl, .press),
+            key(ch('c'), ctrl, .release),
+        });
+}
+
+// Recorded from Rex through GNU screen 4.00 (no kitty protocol: the
+// disabled path): i, Enter, Ctrl-], Space, Ctrl-C.
+test "recorded: Rex through screen, legacy" {
+    try expectDecode(.legacy, "i\x0d\x1d \x03", &.{
+        key(ch('i'), none, .press),
+        key(nm(.enter), none, .press),
+        key(ch(']'), ctrl, .press),
+        key(ch(' '), none, .press),
+        key(ch('c'), ctrl, .press),
+    });
+}
+
 test "focus reports on both paths" {
     for ([_]Mode{ .kitty, .legacy }) |m| try expectDecode(m, "\x1b[O\x1b[I", &.{ .{ .focus = false }, .{ .focus = true } });
 }
