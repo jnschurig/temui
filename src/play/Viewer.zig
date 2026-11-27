@@ -161,13 +161,15 @@ pub fn init(gpa: std.mem.Allocator, io: std.Io, choice: caps.Choice, clock: Engi
     return v;
 }
 
-/// The menu's lines, `p  pause / resume`. Done once `v` is at its final
-/// address, since the slices point into it.
-fn menuLines(v: *Viewer) []const []const u8 {
-    for (&Modes.menu_items, 0..) |item, i| {
+/// The lines for `items` (the menu `Modes.view` shows), `p  pause /
+/// resume`. Done once `v` is at its final address, since the slices point
+/// into it.
+fn menuLines(v: *Viewer, items: []const Modes.MenuItem) []const []const u8 {
+    std.debug.assert(items.len <= v.menu_lines.len);
+    for (items, 0..) |item, i| {
         v.menu_lines[i] = std.fmt.bufPrint(&v.menu_text[i], "{c}  {s}", .{ item.key, item.label }) catch unreachable; // labels are short
     }
-    return &v.menu_lines;
+    return v.menu_lines[0..items.len];
 }
 
 /// Removes what was drawn (kitty images, the frame's cells, the boxes and
@@ -286,8 +288,8 @@ pub fn resize(v: *Viewer, ws: ?caps.WinSize, stats: *Stats) !void {
 /// Where the layers go over `image` (the fitted image box).
 fn place(v: *Viewer, view: Modes.View, image: Rect) Layers {
     var l: Layers = .{};
-    if (view.menu != null) {
-        const lines = v.menuLines();
+    if (view.menu) |items| {
+        const lines = v.menuLines(items);
         if (boxes.layout(lines, .bottom, image)) |r| l.menu = .{ .rect = r, .lines = lines };
     }
     if (view.box) |b| {
@@ -694,6 +696,23 @@ test "the menu is drawn, then closed with its cells repainted" {
     try v.update(viewSource(1, tui_view), &h.stats, 2);
     try testing.expectEqual(null, v.drawn.?.menu);
     try expectSameScreen(&ref.screen, &h.screen, 40, 12);
+}
+
+test "the menu draws the items the view gives: no way back to the game when disabled" {
+    var h: Harness = .{};
+    defer h.deinit();
+    var v = try h.viewer(false);
+    defer v.deinit(&h.stats);
+    var disabled = menu_view;
+    disabled.menu = &Modes.menu_items_disabled;
+    try v.update(viewSource(1, disabled), &h.stats, 0);
+    const m = v.drawn.?.menu.?;
+    try testing.expectEqual(Modes.menu_items_disabled.len, m.lines.len);
+    var buf: [512]u8 = undefined;
+    var r = m.rect.row + 1;
+    while (r < m.rect.row + m.rect.rows - 1) : (r += 1)
+        try testing.expect(!contains(h.row(&buf, r), "back to game"));
+    try testing.expect(contains(h.row(&buf, m.rect.row + 7), "q  quit"));
 }
 
 test "a centered box over the menu; new frames keep clear of both" {

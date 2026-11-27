@@ -63,7 +63,7 @@ temui play testdata/testcore.rom --core zig-out/lib/temui_test_libretro.dylib --
 | `--paused` | Start paused, showing the first frame |
 | `--duration <s>` | Quit after `<s>` seconds |
 | `--renderer <name>` | `kitty`, `halfblock`, `ascii` or `auto` (default) |
-| `--keyboard <path>` | `auto` (default: the kitty keyboard protocol if the terminal reports it, else game input is disabled), `kitty` (push the protocol even if detection didn't see it) or `legacy` (game input without releases, for automation: see below). Ignored on Windows, which always uses console input |
+| `--keyboard <mode>` | `auto` (default: the kitty keyboard protocol if the terminal reports it, else game input is disabled), `kitty` (push the protocol even if detection didn't see it) or `legacy` (game input without releases, for automation: see below). Ignored on Windows, which always uses console input |
 | `--mode-key <chord>` | The chord that leaves game mode (default `ctrl-]`): `ctrl-a`…`ctrl-z`, `ctrl-]`, `ctrl-\` or `ctrl-^`, except `ctrl-c`, `ctrl-h`, `ctrl-i`, `ctrl-j` and `ctrl-m` |
 | `--option`, `--system-dir`, `--save-dir` | As for `run` |
 

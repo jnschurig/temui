@@ -422,7 +422,7 @@ pub fn usage(w: *std.Io.Writer, log_dir: []const u8) std.Io.Writer.Error!void {
         \\      --speed <x>         Starting speed: a multiple such as 0.25 or 4, or max (default 1)
         \\      --present-fps <f>   Draw at most <f> frames per second (default: the core's fps)
         \\      --overlay           Start with the detailed stats in the status line
-        \\      --keyboard <path>   auto (default), kitty or legacy; ignored on Windows
+        \\      --keyboard <mode>   auto (default), kitty or legacy; ignored on Windows
         \\      --mode-key <chord>  The chord that leaves game mode (default ctrl-]);
         \\                          ctrl-a to ctrl-z, ctrl-], ctrl-\ or ctrl-^
         \\      --paused            Start paused, showing the first frame
@@ -833,7 +833,7 @@ test "usage documents play" {
     var buf: [8192]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     try usage(&w, "/logs");
-    for ([_][]const u8{ "temui play <rom> --core <path>", "--speed <x>", "--present-fps <f>", "--overlay", "--paused", "--duration <s>", "--keyboard <path>", "--mode-key <chord>", "Play keys:", "Ctrl-C twice" }) |want| {
+    for ([_][]const u8{ "temui play <rom> --core <path>", "--speed <x>", "--present-fps <f>", "--overlay", "--paused", "--duration <s>", "--keyboard <mode>", "--mode-key <chord>", "Play keys:", "Ctrl-C twice" }) |want| {
         if (std.mem.indexOf(u8, w.buffered(), want) == null) {
             std.debug.print("usage lacks '{s}'\n", .{want});
             return error.TestUnexpectedResult;

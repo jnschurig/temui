@@ -204,7 +204,13 @@ pub fn switchToDisabled(m: *Modes, paused: bool, out: *Effects) void {
     m.path = .disabled;
     m.mode = .tui;
     if (!paused) out.push(.{ .engine = .pause });
-    m.openModal(.input_lost, out);
+    // A Ctrl-C prompt that is showing stays, as Ctrl-C replaces the box: its
+    // 0x03 may be the very byte that set this off, so the next one quits.
+    const ctrl_c = if (m.transient) |t| t.kind == .ctrl_c else false;
+    if (ctrl_c) {
+        m.releaseAll();
+        out.push(.layers_changed);
+    } else m.openModal(.input_lost, out);
     m.syncButtons(out);
 }
 
@@ -341,7 +347,9 @@ fn gameKey(m: *Modes, e: keys.Event, now: i96, out: *Effects) void {
     }
     switch (m.path) {
         .kitty, .console => {
-            if (bindings.lookup(m.config.table, e) == null) return;
+            // A release always lets go, even with a modifier held since the
+            // press (which `lookup` would refuse): only bound keys are held.
+            if (e.kind != .release and bindings.lookup(m.config.table, e) == null) return;
             switch (e.kind) {
                 .press => if (m.heldIndex(e.key) == null and m.held_len < max_held) {
                     m.held[m.held_len] = normalized(e.key);
@@ -1042,6 +1050,33 @@ test "switchToDisabled while paused, from the menu; Ctrl-C replaces the box" {
     try testing.expect(!v.box.?.modal);
     try testing.expectEqualStrings(ctrl_c_text[0], v.box.?.lines[0]);
     try testing.expect(hasQuit(h.key(ctrl('c'), 4)));
+}
+
+test "kitty: a release with a modifier held since the press still lets go" {
+    var h: Harness = .init(.{ .path = .kitty });
+    _ = h.key(press('f'), 0);
+    try testing.expect(h.down(.right));
+    // Ctrl goes down, then f comes up with Ctrl reported.
+    _ = h.key(.{ .key = .{ .char = 'f' }, .mods = .{ .ctrl = true }, .kind = .release }, 1);
+    try testing.expect(!h.anyDown());
+    // A press with Alt held still doesn't reach the game.
+    _ = h.key(.{ .key = .{ .char = 'f' }, .mods = .{ .alt = true } }, 2);
+    try testing.expect(!h.anyDown());
+}
+
+test "switchToDisabled set off by Ctrl-C: the prompt stays, and the next Ctrl-C quits" {
+    const lv = quietLogs();
+    defer testing.log_level = lv;
+    var h: Harness = .init(.{ .path = .kitty });
+    _ = h.key(ctrl('c'), 0);
+    h.out.clear();
+    h.m.switchToDisabled(h.paused, &h.out);
+    h.apply();
+    try testing.expect(h.paused);
+    const v = h.m.view();
+    try testing.expectEqual(Flag.game_disabled, v.flag);
+    try testing.expectEqualStrings(ctrl_c_text[0], v.box.?.lines[0]);
+    try testing.expect(hasQuit(h.key(ctrl('c'), 10)));
 }
 
 test "every menu item has a distinct key; only quit is menu-only" {

@@ -5,7 +5,8 @@
 //! pipe, with the timeout floored to whole ms and the sub-ms rest slept with
 //! `nanosleep`. Windows: `WaitForMultipleObjects` on the console input
 //! handle and a high-resolution waitable timer; console `KEY_EVENT`s become
-//! UTF-8 bytes for the key decoder, `WINDOW_BUFFER_SIZE_EVENT` a resize.
+//! `keys.Input`s (`console_keys.translate`, in `Wake.keys`), and
+//! `WINDOW_BUFFER_SIZE_EVENT` a resize.
 
 const std = @import("std");
 const builtin = @import("builtin");

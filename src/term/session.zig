@@ -282,7 +282,7 @@ pub fn restoreBestEffort() void {
 }
 
 extern "c" fn tcflush(fd: c.fd_t, queue: c_int) c_int;
-/// Same value on Linux, macOS and the BSDs.
+/// 0 on Linux, 1 on macOS and the BSDs.
 const TCIFLUSH: c_int = if (builtin.os.tag == .linux) 0 else 1;
 
 /// Writes all of `bytes`, retrying on EINTR and short writes. Returns false
