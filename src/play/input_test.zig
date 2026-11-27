@@ -25,10 +25,7 @@ const Rig = struct {
     fn init(r: *Rig, path: Modes.Path) void {
         r.* = .{ .engine = undefined, .modes = undefined };
         r.engine = .init(r.fc.clock(), .{ .paused = true });
-        // `start_paused`: the legacy warning must not resume the engine,
-        // which this rig steps by hand.
-        r.modes = .init(.{ .path = path, .start_paused = true }, &r.fx);
-        r.apply();
+        r.modes = .init(.{ .path = path });
     }
 
     fn apply(r: *Rig) void {
@@ -106,45 +103,56 @@ test "kitty: press, hold, release; a mode switch releases; a key held through th
     try testing.expectEqual(up, try r.frame(16));
 }
 
-test "legacy: the warning holds input back; a tap and a hold are guessed" {
+test "legacy: the fixed hold: a tap lasts 100 ms, a resent key stays down, Ctrl-] releases" {
     try Engine.loadTestCore();
     defer host.unload();
-    // The warning's log line is expected.
-    const lv = testing.log_level;
-    testing.log_level = .err;
-    defer testing.log_level = lv;
     var r: Rig = undefined;
     r.init(.legacy);
 
-    // Behind the warning, keys don't reach the game; the first dismisses it.
+    // A tap: down on the next frame, up once 100 ms have passed.
     r.key(keys.Event.char('e'));
+    for (0..6) |_| try testing.expectEqual(up, try r.frame(16)); // 96 ms
+    try testing.expectEqual(0, try r.frame(4)); // 100 ms
     try testing.expectEqual(0, try r.frame(16));
-    try testing.expectEqual(null, r.modes.view().box);
 
-    // A tap: held for the initial window (500 ms), then released.
-    r.key(keys.Event.char('e'));
-    var t: i96 = 0;
-    while (t + 16 < 480) : (t += 16) try testing.expectEqual(up, try r.frame(16));
-    try testing.expectEqual(0, try r.frame(60));
-
-    // A hold: 400 ms to the first repeat, then every 33 ms. Continuous.
-    _ = try r.frame(500);
-    r.key(keys.Event.char('e'));
-    for (0..25) |_| try testing.expectEqual(up, try r.frame(16));
+    // A hold: resent every 33 ms, continuously down.
     r.key(keys.Event.char('e'));
     for (0..20) |_| {
         try testing.expectEqual(up, try r.frame(16));
         try testing.expectEqual(up, try r.frame(17));
         r.key(keys.Event.char('e'));
     }
-    // Let go: released about 2.5 repeat intervals after the last one.
-    try testing.expectEqual(up, try r.frame(50));
-    try testing.expectEqual(0, try r.frame(70));
+    // Let go: released 100 ms after the last press.
+    try testing.expectEqual(up, try r.frame(99));
+    try testing.expectEqual(0, try r.frame(1));
 
-    // A guessed hold is released by the mode key too.
+    // The mode key releases a held key at once.
     r.key(keys.Event.char('e'));
     try testing.expectEqual(up, try r.frame(16));
     r.key(.{ .key = .{ .char = ']' }, .mods = .{ .ctrl = true } });
     try testing.expectEqual(.tui, r.modes.view().mode);
+    try testing.expectEqual(0, try r.frame(16));
+}
+
+test "disabled: game keys never reach the core" {
+    try Engine.loadTestCore();
+    defer host.unload();
+    // Disabling game input logs at warn level.
+    const lv = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = lv;
+    var r: Rig = undefined;
+    r.init(.disabled);
+
+    for ("esdfljka;hg") |c| {
+        r.key(keys.Event.char(c));
+        try testing.expectEqual(0, try r.frame(16));
+    }
+    // The ways into game mode don't open it.
+    r.key(keys.Event.char('i'));
+    r.key(keys.Event.named(.enter));
+    r.key(.{ .key = .{ .char = ']' }, .mods = .{ .ctrl = true } });
+    try testing.expectEqual(.tui, r.modes.view().mode);
+    r.key(keys.Event.char('e'));
     try testing.expectEqual(0, try r.frame(16));
 }

@@ -39,13 +39,14 @@ const is_windows = builtin.os.tag == .windows;
 const kitty_flags: u8 = 15;
 
 /// The input path: Windows console input always; otherwise `--keyboard`,
-/// with `auto` following detection.
+/// with `auto` following detection. Without the kitty protocol, `auto`
+/// disables game input (D9); only `--keyboard legacy` gives the fixed hold.
 fn inputPath(k: cli.Keyboard, detected: bool, windows: bool) Modes.Path {
     if (windows) return .console;
     return switch (k) {
         .kitty => .kitty,
         .legacy => .legacy,
-        .auto => if (detected) .kitty else .legacy,
+        .auto => if (detected) .kitty else .disabled,
     };
 }
 const ns_per_s = std.time.ns_per_s;
@@ -124,10 +125,12 @@ pub fn run(
     if (is_windows) {
         log.info("keyboard: console input{s}", .{if (p.keyboard != .auto) " (--keyboard is ignored on Windows)" else ""});
     } else {
-        log.info("keyboard: {t} ({s}){s}", .{
-            path,                                             if (p.keyboard == .auto) "detected" else "--keyboard",
-            if (path == .kitty) ", pushing flags 15" else "",
-        });
+        switch (path) {
+            .kitty => log.info("keyboard: kitty ({s}), pushing flags 15", .{if (p.keyboard == .auto) "detected" else "--keyboard"}),
+            .legacy => log.info("keyboard: legacy (--keyboard, fixed 100 ms hold)", .{}),
+            .disabled => log.info("keyboard: disabled (no kitty keyboard protocol detected)", .{}),
+            .console => unreachable,
+        }
     }
 
     session.enter(.{
@@ -204,8 +207,7 @@ pub fn run(
     if (p.paused) engine.apply(.step, clock.now());
 
     var fx: Modes.Effects = .{};
-    var modes: Modes = .init(.{ .path = path, .mode_key = p.mode_key, .start_paused = p.paused }, &fx);
-    _ = applyEffects(&fx, &engine, &viewer, clock.now());
+    var modes: Modes = .init(.{ .path = path, .mode_key = p.mode_key });
     var decoder: key_decoder.Decoder = .init(if (path == .kitty) .kitty else .legacy);
 
     const start = clock.now();
@@ -287,9 +289,10 @@ pub fn run(
             }
             if (decoder.expire(t)) |in| modes.handle(in, t, engine.paused(), &fx);
             if (modes.path == .kitty and decoder.sawLegacyKey()) {
-                log.warn("the kitty keyboard protocol isn't active (a key arrived in legacy form): switching to legacy input", .{});
+                log.warn("the kitty keyboard protocol isn't active (a key arrived in legacy form)", .{});
+                // TUI keys still arrive, in legacy form.
                 decoder.switchToLegacy();
-                modes.switchToLegacy(engine.paused(), &fx);
+                modes.switchToDisabled(engine.paused(), &fx);
             }
         }
         modes.tick(t, &fx);
@@ -365,7 +368,7 @@ test "input path: Windows is always console; auto follows detection" {
     try std.testing.expectEqual(Modes.Path.console, inputPath(.legacy, true, true));
     try std.testing.expectEqual(Modes.Path.console, inputPath(.auto, false, true));
     try std.testing.expectEqual(Modes.Path.kitty, inputPath(.auto, true, false));
-    try std.testing.expectEqual(Modes.Path.legacy, inputPath(.auto, false, false));
+    try std.testing.expectEqual(Modes.Path.disabled, inputPath(.auto, false, false));
     try std.testing.expectEqual(Modes.Path.kitty, inputPath(.kitty, false, false));
     try std.testing.expectEqual(Modes.Path.legacy, inputPath(.legacy, true, false));
 }

@@ -157,7 +157,7 @@ test {
     _ = @import("play/boxes.zig");
     _ = @import("play/TestScreen.zig");
     _ = @import("play/bindings.zig");
-    _ = @import("play/ReleaseGuesser.zig");
+    _ = @import("play/FixedHold.zig");
     _ = @import("play/Modes.zig");
     _ = @import("play/stdio.zig");
     _ = @import("play/events.zig");

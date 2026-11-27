@@ -364,23 +364,37 @@ fn drawStatus(v: *Viewer, w: *std.Io.Writer, src: Source, overflow: []const []co
     const row = v.status_row.?;
     v.next_status_ns = now + status_period_ns;
     var tmp: [statusline.max_len]u8 = undefined;
-    const line = statusline.format(&tmp, .{
+    const row_text = statusline.format(&tmp, .{
         .mode = src.view.mode,
-        .legacy = src.view.legacy,
+        .flag = src.view.flag,
         .message = overflow,
         .game = src.game,
         .detailed = v.detailed_stats,
         .stats = src.status,
     }, statusline.default_layout, v.window_cols);
+    const line = row_text.text;
+    // The alert's place follows from the text, so comparing the text is
+    // enough.
     if (!v.status_stale and std.mem.eql(u8, line, v.status_buf[0..v.status_len])) return;
     @memcpy(v.status_buf[0..line.len], line);
     v.status_len = line.len;
     v.status_stale = false;
     try sgr.cup(w, row, 1);
-    try w.writeAll(boxes.style(v.basic_color));
-    try w.writeAll(line);
+    const style = boxes.style(v.basic_color);
+    try w.writeAll(style);
+    if (row_text.alert) |a| {
+        try w.writeAll(line[0..a.start]);
+        try w.writeAll(sgr.reset ++ alert_style);
+        try w.writeAll(line[a.start..a.end]);
+        try w.writeAll(sgr.reset);
+        try w.writeAll(style);
+        try w.writeAll(line[a.end..]);
+    } else try w.writeAll(line);
     try w.writeAll(sgr.reset);
 }
+
+/// White on red, from the basic 16 colours, so every terminal shows it.
+pub const alert_style = "\x1b[97;41m";
 
 fn rectEql(a: Rect, b: Rect) bool {
     return a.col == b.col and a.row == b.row and a.cols == b.cols and a.rows == b.rows;
@@ -521,9 +535,9 @@ const Harness = struct {
 const test_rgb: [8 * 6 * 3]u8 = @splat(128);
 const test_rgb2: [8 * 6 * 3]u8 = @splat(30);
 
-const game_view: Modes.View = .{ .mode = .game, .legacy = false, .menu = null, .box = null };
-const menu_view: Modes.View = .{ .mode = .tui, .legacy = false, .menu = &Modes.menu_items, .box = null };
-const tui_view: Modes.View = .{ .mode = .tui, .legacy = false, .menu = null, .box = null };
+const game_view: Modes.View = .{ .mode = .game, .menu = null, .box = null };
+const menu_view: Modes.View = .{ .mode = .tui, .menu = &Modes.menu_items, .box = null };
+const tui_view: Modes.View = .{ .mode = .tui, .menu = null, .box = null };
 const quit_box: Modes.Box = .{ .lines = &Modes.quit_prompt_text, .modal = true };
 
 fn testSource(seq: u64) Source {
@@ -595,6 +609,19 @@ test "the bottom row is the status line's" {
     try testing.expect(std.mem.endsWith(u8, status, " 60.0 fps · 1× "));
     try testing.expect(h.screen.at(12, 1).bg and h.screen.at(12, 40).bg);
     for (1..12) |r| try testing.expect(!contains(h.row(&buf, @intCast(r)), "GAME"));
+}
+
+test "game input disabled: the flag is drawn white on red, the rest as usual" {
+    var h: Harness = .{};
+    defer h.deinit();
+    var v = try h.viewer(false);
+    defer v.deinit(&h.stats);
+    try v.update(viewSource(1, .{ .mode = .tui, .flag = .game_disabled, .menu = null, .box = null }), &h.stats, 0);
+    const out = h.take();
+    const style = comptime boxes.style(false);
+    try testing.expect(contains(out, style ++ " TUI  " ++ sgr.reset ++ alert_style ++ "GAME MODE DISABLED" ++ sgr.reset ++ style ++ "  Space: menu"));
+    var buf: [512]u8 = undefined;
+    try testing.expect(std.mem.startsWith(u8, h.row(&buf, 12), " TUI  GAME MODE DISABLED  Space: menu"));
 }
 
 test "the status line is rewritten only when its text changes" {

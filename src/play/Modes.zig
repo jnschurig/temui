@@ -10,22 +10,26 @@
 //! one layer.
 //!
 //! Layers, bottom to top: the mode, the menu (TUI only), then at most one
-//! centered box: a modal one (the quit prompt or the legacy warning), which
-//! consumes every key, or the transient Ctrl-C prompt, which lets keys
-//! through. Ctrl-C reaches the quit confirmation from every layer.
+//! centered box: a modal one (the quit prompt or the input-lost box), which
+//! consumes every key, or a transient one (the Ctrl-C prompt or the
+//! game-input-disabled notice), which lets keys through. Ctrl-C reaches the
+//! quit confirmation from every layer.
+//!
+//! Game input needs release events (D9): the kitty protocol or the Windows
+//! console. Without them (`disabled`), the run stays in TUI mode. The
+//! `legacy` path (`--keyboard legacy`, for automation) holds each press for
+//! a fixed time (`FixedHold`), in game mode only.
 //!
 //! No stuck keys: entering TUI mode, losing focus and opening a modal box
-//! release every button. With release events (kitty, Windows console), a
-//! key held through a return to game mode acts only once pressed again.
-//! On the legacy path, releases are guessed from auto-repeat
-//! (`ReleaseGuesser`), in game mode only.
+//! release every button. With release events, a key held through a return
+//! to game mode acts only once pressed again.
 
 const std = @import("std");
 const keys = @import("../term/keys.zig");
 const host = @import("../libretro/host.zig");
 const bindings = @import("bindings.zig");
 const Engine = @import("Engine.zig");
-const ReleaseGuesser = @import("ReleaseGuesser.zig");
+const FixedHold = @import("FixedHold.zig");
 
 const log = std.log.scoped(.input);
 
@@ -34,11 +38,14 @@ const Modes = @This();
 pub const Path = enum {
     kitty,
     console,
+    /// `--keyboard legacy`: presses only, held for a fixed time.
     legacy,
+    /// No release events (and not `--keyboard legacy`): game input is off.
+    disabled,
 
     /// Whether the path reports releases (and so a lone Esc is unambiguous).
     pub fn hasReleases(p: Path) bool {
-        return p != .legacy;
+        return p == .kitty or p == .console;
     }
 };
 
@@ -46,17 +53,21 @@ pub const Config = struct {
     path: Path,
     /// The mode-key chord: Ctrl + this character.
     mode_key: u21 = ']',
-    /// `--paused`: the engine starts paused, so the legacy warning's hold
-    /// must not resume it.
-    start_paused: bool = false,
     table: []const bindings.Binding = &bindings.default,
 };
 
 pub const Mode = enum { game, tui };
-pub const Modal = enum { none, quit_prompt, legacy_warning };
+pub const Modal = enum { none, quit_prompt, input_lost };
+pub const Transient = struct {
+    kind: enum { ctrl_c, game_disabled },
+    /// When it goes away.
+    until: i96,
+};
 
 /// How long the Ctrl-C prompt waits for the second Ctrl-C.
 pub const ctrl_c_window_ns: i96 = 3 * std.time.ns_per_s;
+/// How long the game-input-disabled notice shows.
+pub const notice_ns: i96 = 3 * std.time.ns_per_s;
 
 pub const Effect = union(enum) {
     engine: Engine.Command,
@@ -111,46 +122,43 @@ pub const menu_items = [_]MenuItem{
     .{ .key = 'q', .label = "quit", .action = .quit, .direct = false },
 };
 
+/// The menu with game input disabled: no way back to a game mode that
+/// can't be entered.
+pub const menu_items_disabled = blk: {
+    var out: [menu_items.len - 1]MenuItem = undefined;
+    var n: usize = 0;
+    for (menu_items) |item| if (item.action != .game) {
+        out[n] = item;
+        n += 1;
+    };
+    break :blk out;
+};
+
 pub const quit_prompt_text = [_][]const u8{"Quit? Enter to confirm, any other key cancels"};
 pub const ctrl_c_text = [_][]const u8{"Press Ctrl-C again to quit"};
-/// The legacy warning. It names the mode key, because Esc can't leave game
-/// mode on this path and the chord is the only way out.
-pub fn legacyWarningText(mode_key: u21) []const []const u8 {
-    return switch (mode_key) {
-        inline 'a'...'z', ']', '\\', '^' => |k| legacyWarning(std.fmt.comptimePrint("Ctrl-{c}", .{std.ascii.toUpper(@as(u8, k))})),
-        else => legacyWarning("The mode key"),
-    };
-}
-
-/// A container-level constant per chord, so the lines outlive the call: the
-/// viewer keeps them across frames.
-fn legacyWarning(comptime chord: []const u8) []const []const u8 {
-    return &struct {
-        const lines = [_][]const u8{
-            "Legacy keyboard input",
-            "",
-            "Held keys are guessed from auto-repeat:",
-            "a tap holds its button for up to 0.5 s,",
-            "and only one key can be held at a time.",
-            "The kitty keyboard protocol (or Windows)",
-            "reports real releases.",
-            "",
-            chord ++ " leaves game mode (Esc doesn't).",
-            "",
-            "Press any key to continue.",
-        };
-    }.lines;
-}
+pub const game_disabled_text = [_][]const u8{
+    "Game input needs the kitty keyboard protocol",
+    "(Ghostty, kitty, WezTerm, Rex, foot) or Windows.",
+    "If yours has it, try --keyboard kitty.",
+};
+pub const input_lost_text = [_][]const u8{
+    "The terminal stopped reporting key releases,",
+    "so game input is off.",
+    "Press any key.",
+};
 
 pub const Box = struct {
     lines: []const []const u8,
     modal: bool,
 };
 
+/// The status line's flag after the mode.
+pub const Flag = enum { none, legacy, game_disabled };
+
 /// What the viewer draws.
 pub const View = struct {
     mode: Mode,
-    legacy: bool,
+    flag: Flag = .none,
     /// The menu's entries while it is open.
     menu: ?[]const MenuItem,
     /// The centered box, if any.
@@ -164,42 +172,39 @@ path: Path,
 mode: Mode = .game,
 menu_open: bool = false,
 modal: Modal = .none,
-/// When the Ctrl-C prompt goes away; null when it isn't shown.
-ctrl_c_until: ?i96 = null,
-/// The legacy warning paused the engine, so dismissing it resumes it.
-hold_resumes: bool = false,
+/// The transient box, if one is showing. A modal box hides it.
+transient: ?Transient = null,
 /// Release-event paths: the keys pressed in game mode since it was last
 /// entered, still down. Keys not in here (held through a mode switch)
 /// are ignored until pressed again.
 held: [max_held]keys.Key = undefined,
 held_len: usize = 0,
 /// Legacy path, game mode only.
-guesser: ReleaseGuesser = .{},
+hold: FixedHold = .{},
 /// The buttons last sent with `set_input`.
 sent: host.Buttons = @splat(false),
 
-/// Starts in game mode. On the legacy path the warning is shown at once,
-/// with the engine held paused behind it (`out` gets the commands; the
-/// caller still steps once for the first frame when `start_paused`).
-pub fn init(config: Config, out: *Effects) Modes {
+/// Starts in game mode, or in TUI mode with game input disabled.
+pub fn init(config: Config) Modes {
     var m: Modes = .{ .config = config, .path = config.path };
-    if (config.path == .legacy) {
-        m.openLegacyWarning(config.start_paused, out);
-        // The first frame is shown behind the box.
-        if (!config.start_paused) out.push(.{ .engine = .step });
+    if (config.path == .disabled) {
+        m.mode = .tui;
+        log.warn("game input disabled: the terminal doesn't report key releases (no kitty keyboard protocol detected); if it has the protocol, try --keyboard kitty", .{});
     }
     return m;
 }
 
-/// Switches to the legacy path for the rest of the run (the kitty protocol
-/// turned out not to be active): every button is released and the legacy
-/// warning opens, holding the engine unless it is already `paused`.
-pub fn switchToLegacy(m: *Modes, paused: bool, out: *Effects) void {
-    if (m.path == .legacy) return;
-    m.path = .legacy;
-    m.releaseAll();
-    m.guesser = .{};
-    m.openLegacyWarning(paused, out);
+/// Disables game input for the rest of the run (the kitty protocol turned
+/// out not to be active): every button is released, the engine is paused
+/// unless it already is, and the input-lost box opens. Dismissing it never
+/// resumes; `p` does, as for any pause.
+pub fn switchToDisabled(m: *Modes, paused: bool, out: *Effects) void {
+    if (!m.path.hasReleases()) return;
+    log.warn("the terminal stopped reporting key releases: game input disabled, game paused", .{});
+    m.path = .disabled;
+    m.mode = .tui;
+    if (!paused) out.push(.{ .engine = .pause });
+    m.openModal(.input_lost, out);
     m.syncButtons(out);
 }
 
@@ -220,36 +225,46 @@ pub fn handle(m: *Modes, input: keys.Input, now: i96, paused: bool, out: *Effect
     m.syncButtons(out);
 }
 
-/// Expires the Ctrl-C prompt and, on the legacy path, guessed holds.
+/// Expires the transient box and, on the legacy path, fixed holds.
 pub fn tick(m: *Modes, now: i96, out: *Effects) void {
-    if (m.ctrl_c_until) |t| if (now >= t) {
-        m.ctrl_c_until = null;
+    if (m.transient) |t| if (now >= t.until) {
+        m.transient = null;
         out.push(.layers_changed);
     };
     if (m.path == .legacy and m.mode == .game) {
-        var buf: [ReleaseGuesser.capacity]keys.Key = undefined;
-        _ = m.guesser.expire(now, &buf);
+        var buf: [FixedHold.capacity]keys.Key = undefined;
+        _ = m.hold.expire(now, &buf);
     }
     m.syncButtons(out);
 }
 
 /// When `tick` next has work, if ever.
 pub fn nextDeadline(m: *const Modes) ?i96 {
-    const g = if (m.path == .legacy and m.mode == .game) m.guesser.nextDeadline() else null;
-    const c = m.ctrl_c_until orelse return g;
-    return if (g) |x| @min(x, c) else c;
+    const h = if (m.path == .legacy and m.mode == .game) m.hold.nextDeadline() else null;
+    const t = (m.transient orelse return h).until;
+    return if (h) |x| @min(x, t) else t;
 }
 
 pub fn view(m: *const Modes) View {
     const box: ?Box = switch (m.modal) {
         .quit_prompt => .{ .lines = &quit_prompt_text, .modal = true },
-        .legacy_warning => .{ .lines = legacyWarningText(m.config.mode_key), .modal = true },
-        .none => if (m.ctrl_c_until != null) .{ .lines = &ctrl_c_text, .modal = false } else null,
+        .input_lost => .{ .lines = &input_lost_text, .modal = true },
+        .none => if (m.transient) |t| .{
+            .lines = switch (t.kind) {
+                .ctrl_c => &ctrl_c_text,
+                .game_disabled => &game_disabled_text,
+            },
+            .modal = false,
+        } else null,
     };
     return .{
         .mode = m.mode,
-        .legacy = m.path == .legacy,
-        .menu = if (m.menu_open) &menu_items else null,
+        .flag = switch (m.path) {
+            .kitty, .console => .none,
+            .legacy => .legacy,
+            .disabled => .game_disabled,
+        },
+        .menu = if (m.menu_open) m.menu() else null,
         .box = box,
     };
 }
@@ -257,6 +272,10 @@ pub fn view(m: *const Modes) View {
 /// The buttons the core sees from the next frame.
 pub fn buttons(m: *const Modes) host.Buttons {
     return m.sent;
+}
+
+fn menu(m: *const Modes) []const MenuItem {
+    return if (m.path == .disabled) &menu_items_disabled else &menu_items;
 }
 
 fn handleKey(m: *Modes, e: keys.Event, now: i96, paused: bool, out: *Effects) void {
@@ -276,7 +295,7 @@ fn handleKey(m: *Modes, e: keys.Event, now: i96, paused: bool, out: *Effects) vo
     switch (m.mode) {
         .game => m.gameKey(e, now, out),
         .tui => if (e.kind == .press) {
-            if (m.menu_open) m.menuKey(e, paused, out) else m.tuiKey(e, paused, out);
+            if (m.menu_open) m.menuKey(e, now, paused, out) else m.tuiKey(e, now, paused, out);
         },
     }
 }
@@ -287,15 +306,16 @@ fn ctrlC(m: *Modes, now: i96, out: *Effects) void {
         out.push(.quit);
         return;
     }
-    if (m.ctrl_c_until) |t| if (now < t) {
+    if (m.transient) |t| if (t.kind == .ctrl_c and now < t.until) {
         log.info("quit confirmed (second Ctrl-C)", .{});
         out.push(.quit);
         return;
     };
-    // Replaces the legacy warning, which counts as dismissed.
-    if (m.modal == .legacy_warning) m.closeModal(out);
+    // Replaces the input-lost box, which counts as dismissed, and the
+    // game-input-disabled notice.
+    if (m.modal == .input_lost) m.closeModal(out);
     m.menu_open = false;
-    m.ctrl_c_until = now + ctrl_c_window_ns;
+    m.transient = .{ .kind = .ctrl_c, .until = now + ctrl_c_window_ns };
     out.push(.layers_changed);
 }
 
@@ -309,7 +329,7 @@ fn dismissModal(m: *Modes, e: keys.Event, out: *Effects) void {
             log.info("quit cancelled", .{});
             m.closeModal(out);
         },
-        .legacy_warning => m.closeModal(out),
+        .input_lost => m.closeModal(out),
     }
 }
 
@@ -319,36 +339,42 @@ fn gameKey(m: *Modes, e: keys.Event, now: i96, out: *Effects) void {
         if (e.kind == .press) m.setMode(.tui, out);
         return;
     }
-    if (m.path.hasReleases()) {
-        if (bindings.lookup(m.config.table, e) == null) return;
-        switch (e.kind) {
-            .press => if (m.heldIndex(e.key) == null and m.held_len < max_held) {
-                m.held[m.held_len] = normalized(e.key);
-                m.held_len += 1;
-            },
-            .repeat => {},
-            .release => if (m.heldIndex(e.key)) |i| {
-                m.held[i] = m.held[m.held_len - 1];
-                m.held_len -= 1;
-            },
-        }
-    } else {
-        // Esc does nothing in game mode here: a lone Esc needs a timeout.
-        // ESC then a byte arrives as Alt+key: take it as the key, so a
-        // habitual Esc doesn't swallow the next game key.
-        var k = e;
-        if (k.mods.alt and !k.mods.ctrl and !k.mods.super) k.mods.alt = false;
-        if (bindings.lookup(m.config.table, k) == null) return;
-        _ = m.guesser.press(normalized(k.key), now);
+    switch (m.path) {
+        .kitty, .console => {
+            if (bindings.lookup(m.config.table, e) == null) return;
+            switch (e.kind) {
+                .press => if (m.heldIndex(e.key) == null and m.held_len < max_held) {
+                    m.held[m.held_len] = normalized(e.key);
+                    m.held_len += 1;
+                },
+                .repeat => {},
+                .release => if (m.heldIndex(e.key)) |i| {
+                    m.held[i] = m.held[m.held_len - 1];
+                    m.held_len -= 1;
+                },
+            }
+        },
+        .legacy => {
+            // Esc does nothing in game mode here: a lone Esc needs a
+            // timeout. ESC then a byte arrives as Alt+key: take it as the
+            // key, so a stray Esc doesn't swallow the next game key.
+            var k = e;
+            if (k.mods.alt and !k.mods.ctrl and !k.mods.super) k.mods.alt = false;
+            if (bindings.lookup(m.config.table, k) == null) return;
+            // `handle` has expired the holds that ran out.
+            m.hold.press(normalized(k.key), now);
+        },
+        // Game mode is never entered.
+        .disabled => unreachable,
     }
 }
 
-fn tuiKey(m: *Modes, e: keys.Event, paused: bool, out: *Effects) void {
-    if (e.isChord(m.config.mode_key)) return m.setMode(.game, out);
+fn tuiKey(m: *Modes, e: keys.Event, now: i96, paused: bool, out: *Effects) void {
+    if (e.isChord(m.config.mode_key)) return m.enterGame(now, out);
     if (e.mods.chord()) return;
     switch (e.key) {
         .named => |n| switch (n) {
-            .enter => m.setMode(.game, out),
+            .enter => m.enterGame(now, out),
             else => {}, // Esc: nothing open, nothing to back out of.
         },
         .char => {
@@ -359,27 +385,27 @@ fn tuiKey(m: *Modes, e: keys.Event, paused: bool, out: *Effects) void {
                 out.push(.layers_changed);
                 return;
             }
-            const item = itemFor(c) orelse return;
-            if (item.direct) m.run(item.action, paused, out);
+            const item = itemFor(&menu_items, c) orelse return;
+            if (item.direct) m.run(item.action, now, paused, out);
         },
     }
 }
 
-fn menuKey(m: *Modes, e: keys.Event, paused: bool, out: *Effects) void {
+fn menuKey(m: *Modes, e: keys.Event, now: i96, paused: bool, out: *Effects) void {
     if (e.mods.chord()) return;
     switch (e.key) {
         .named => |n| if (n == .escape) m.closeMenu(out),
         .char => {
             const c = keys.lower(e.produced().?);
             if (c == ' ') return m.closeMenu(out);
-            const item = itemFor(c) orelse return;
+            const item = itemFor(m.menu(), c) orelse return;
             m.closeMenu(out);
-            m.run(item.action, paused, out);
+            m.run(item.action, now, paused, out);
         },
     }
 }
 
-fn run(m: *Modes, a: Action, paused: bool, out: *Effects) void {
+fn run(m: *Modes, a: Action, now: i96, paused: bool, out: *Effects) void {
     log.debug("action: {t}", .{a});
     switch (a) {
         .toggle_pause => out.push(.{ .engine = if (paused) .@"resume" else .pause }),
@@ -391,23 +417,34 @@ fn run(m: *Modes, a: Action, paused: bool, out: *Effects) void {
         .slower => out.push(.{ .engine = .slower }),
         .reset_speed => out.push(.{ .engine = .reset_speed }),
         .toggle_stats => out.push(.toggle_stats),
-        .game => m.setMode(.game, out),
+        .game => m.enterGame(now, out),
         .quit => m.openModal(.quit_prompt, out),
     }
     // Speed and pause show on the status line.
     if (a != .game and a != .quit) out.push(.layers_changed);
 }
 
-/// The menu entry for `c`, including `=` for `+` (the same key unshifted).
-fn itemFor(c: u21) ?MenuItem {
+/// The entry in `items` for `c`, including `=` for `+` (the same key
+/// unshifted).
+fn itemFor(items: []const MenuItem, c: u21) ?MenuItem {
     const k: u21 = if (c == '=') '+' else c;
-    for (menu_items) |item| if (item.key == k) return item;
+    for (items) |item| if (item.key == k) return item;
     return null;
 }
 
 fn isModeKey(m: *const Modes, e: keys.Event) bool {
     if (e.isChord(m.config.mode_key)) return true;
     return m.path.hasReleases() and e.key == .named and e.key.named == .escape and !e.mods.chord();
+}
+
+/// Back to game mode, or, with game input disabled, the notice saying why
+/// not. A Ctrl-C prompt that is showing stays: Ctrl-C always takes over.
+fn enterGame(m: *Modes, now: i96, out: *Effects) void {
+    if (m.path != .disabled) return m.setMode(.game, out);
+    if (m.transient) |t| if (t.kind == .ctrl_c) return;
+    log.debug("game mode refused: game input disabled", .{});
+    m.transient = .{ .kind = .game_disabled, .until = now + notice_ns };
+    out.push(.layers_changed);
 }
 
 fn setMode(m: *Modes, mode: Mode, out: *Effects) void {
@@ -427,31 +464,20 @@ fn closeMenu(m: *Modes, out: *Effects) void {
 fn openModal(m: *Modes, modal: Modal, out: *Effects) void {
     m.modal = modal;
     m.menu_open = false;
-    m.ctrl_c_until = null;
+    m.transient = null;
     m.releaseAll();
     log.info("box: {t}", .{modal});
     out.push(.layers_changed);
 }
 
-fn openLegacyWarning(m: *Modes, paused: bool, out: *Effects) void {
-    log.warn("legacy keyboard input: releases are guessed from auto-repeat", .{});
-    m.openModal(.legacy_warning, out);
-    m.hold_resumes = !paused;
-    if (!paused) out.push(.{ .engine = .pause });
-}
-
 fn closeModal(m: *Modes, out: *Effects) void {
-    if (m.modal == .legacy_warning and m.hold_resumes) {
-        m.hold_resumes = false;
-        out.push(.{ .engine = .@"resume" });
-    }
     m.modal = .none;
     out.push(.layers_changed);
 }
 
 fn releaseAll(m: *Modes) void {
     m.held_len = 0;
-    m.guesser.releaseAll();
+    m.hold.releaseAll();
 }
 
 fn heldIndex(m: *const Modes, k: keys.Key) ?usize {
@@ -464,10 +490,10 @@ fn heldIndex(m: *const Modes, k: keys.Key) ?usize {
 fn syncButtons(m: *Modes, out: *Effects) void {
     var b: host.Buttons = @splat(false);
     if (m.mode == .game and m.modal == .none) {
-        if (m.path.hasReleases()) {
-            for (m.held[0..m.held_len]) |k| m.pressInto(&b, k);
-        } else {
-            for (m.guesser.held[0..m.guesser.len]) |h| m.pressInto(&b, h.key);
+        switch (m.path) {
+            .kitty, .console => for (m.held[0..m.held_len]) |k| m.pressInto(&b, k),
+            .legacy => for (m.hold.heldKeys()) |h| m.pressInto(&b, h.key),
+            .disabled => {},
         }
     }
     if (std.mem.eql(bool, &b, &m.sent)) return;
@@ -486,6 +512,7 @@ fn normalized(k: keys.Key) keys.Key {
     };
 }
 
+
 // ---------------------------------------------------------------- tests
 
 const testing = std.testing;
@@ -501,10 +528,7 @@ const Harness = struct {
     t: i96 = 0,
 
     fn init(config: Config) Harness {
-        var h: Harness = .{ .m = undefined, .paused = config.start_paused };
-        h.m = Modes.init(config, &h.out);
-        h.apply();
-        return h;
+        return .{ .m = .init(config) };
     }
 
     fn apply(h: *Harness) void {
@@ -548,7 +572,7 @@ const Harness = struct {
     }
 };
 
-/// The legacy warning logs at warn level, which the test runner prints.
+/// Disabling game input logs at warn level, which the test runner prints.
 fn quietLogs() std.log.Level {
     const prev = testing.log_level;
     testing.log_level = .err;
@@ -646,11 +670,8 @@ test "kitty: a key held through the return to game mode stays released" {
 }
 
 test "mode key chord on every path; Enter and i return; Esc in TUI does nothing" {
-    const lv = quietLogs();
-    defer testing.log_level = lv;
     for ([_]Path{ .kitty, .console, .legacy }) |path| {
         var h: Harness = .init(.{ .path = path });
-        if (path == .legacy) _ = h.key(press('x'), 0); // dismiss the warning
         _ = h.key(ctrl(']'), 1);
         try testing.expectEqual(Mode.tui, h.m.view().mode);
         try testing.expectEqual(0, h.key(named(.escape), 2).len);
@@ -674,11 +695,13 @@ test "--mode-key changes the chord; Ctrl-] then is just unbound" {
     try testing.expectEqual(Mode.tui, h.m.view().mode);
 }
 
-test "legacy: Esc does nothing in game mode; ESC+byte is the plain key" {
-    const lv = quietLogs();
-    defer testing.log_level = lv;
+test "legacy: starts in game mode with no box; Esc does nothing in game mode; ESC+byte is the plain key" {
     var h: Harness = .init(.{ .path = .legacy });
-    _ = h.key(press('x'), 0);
+    var v = h.m.view();
+    try testing.expectEqual(Mode.game, v.mode);
+    try testing.expectEqual(Flag.legacy, v.flag);
+    try testing.expect(v.box == null);
+    try testing.expect(!h.paused);
     try testing.expectEqual(0, h.key(named(.escape), 10).len);
     try testing.expectEqual(Mode.game, h.m.view().mode);
     _ = h.key(.{ .key = .{ .char = 'e' }, .mods = .{ .alt = true } }, 20);
@@ -686,7 +709,8 @@ test "legacy: Esc does nothing in game mode; ESC+byte is the plain key" {
     // In TUI mode Esc (recognised after the decoder's timeout) backs out.
     _ = h.key(ctrl(']'), 30);
     _ = h.key(press(' '), 40);
-    try testing.expect(h.m.view().menu != null);
+    v = h.m.view();
+    try testing.expectEqual(menu_items.len, v.menu.?.len);
     _ = h.key(named(.escape), 50);
     try testing.expect(h.m.view().menu == null);
 }
@@ -831,83 +855,105 @@ test "Ctrl-C from the menu closes it; from TUI mode it works too" {
     try testing.expect(hasQuit(h.key(ctrl('c'), 4)));
 }
 
-test "legacy warning: holds the engine, any key dismisses it and is consumed" {
+test "disabled: starts in TUI mode; no game key reaches the bindings" {
     const lv = quietLogs();
     defer testing.log_level = lv;
-    var h: Harness = .init(.{ .path = .legacy });
-    try testing.expect(h.paused);
-    try testing.expect(has(h.out.slice(), .{ .engine = .step }));
+    var h: Harness = .init(.{ .path = .disabled });
     const v = h.m.view();
-    try testing.expect(v.legacy);
-    try testing.expect(v.box.?.modal);
-    try testing.expectEqualStrings("Legacy keyboard input", v.box.?.lines[0]);
-    try testing.expectEqualStrings("Ctrl-] leaves game mode (Esc doesn't).", v.box.?.lines[8]);
-    // The view returns the same lines each frame, so the viewer doesn't redraw.
-    try testing.expectEqual(v.box.?.lines.ptr, h.m.view().box.?.lines.ptr);
-    // The dismissing key is bound (e), but never reaches the game.
-    const fx = h.key(press('e'), 10);
-    try testing.expect(has(fx, .{ .engine = .@"resume" }));
+    try testing.expectEqual(Mode.tui, v.mode);
+    try testing.expectEqual(Flag.game_disabled, v.flag);
+    try testing.expect(v.box == null);
     try testing.expect(!h.paused);
+    // Bound game keys do nothing; Esc is not a mode key.
+    for ("esdfljka;hg") |c| try testing.expectEqual(0, h.key(press(c), 1).len);
+    try testing.expectEqual(0, h.key(named(.escape), 2).len);
     try testing.expect(!h.anyDown());
-    try testing.expect(h.m.view().box == null);
-    _ = h.key(press('e'), 20);
-    try testing.expect(h.down(.up));
+    try testing.expectEqual(Mode.tui, h.m.view().mode);
+    // TUI keys work.
+    try testing.expect(has(h.key(press('p'), 3), .{ .engine = .pause }));
 }
 
-test "legacy warning names the --mode-key chord" {
-    try testing.expectEqualStrings("Ctrl-G leaves game mode (Esc doesn't).", legacyWarningText('g')[8]);
-    try testing.expectEqualStrings("Ctrl-\\ leaves game mode (Esc doesn't).", legacyWarningText('\\')[8]);
-}
-
-test "legacy warning with --paused: dismissing it doesn't resume" {
+test "disabled: i, Enter, the chord and the direct key show the notice for 3 s" {
     const lv = quietLogs();
     defer testing.log_level = lv;
-    var h: Harness = .init(.{ .path = .legacy, .start_paused = true });
-    try testing.expect(!has(h.out.slice(), .{ .engine = .step }));
-    try testing.expect(!has(h.out.slice(), .{ .engine = .pause }));
-    try testing.expect(!has(h.key(press('x'), 0), .{ .engine = .@"resume" }));
-    try testing.expect(h.paused);
+    const ways = [_]keys.Event{ press('i'), named(.enter), ctrl(']'), .{ .key = .{ .char = 'i' }, .shifted = 'I', .mods = .{ .shift = true } } };
+    for (ways) |way| {
+        var h: Harness = .init(.{ .path = .disabled });
+        const fx = h.key(way, 1000);
+        try testing.expect(has(fx, .layers_changed));
+        const v = h.m.view();
+        try testing.expectEqual(Mode.tui, v.mode);
+        try testing.expect(!v.box.?.modal);
+        try testing.expectEqual(game_disabled_text.len, v.box.?.lines.len);
+        try testing.expectEqualStrings("If yours has it, try --keyboard kitty.", v.box.?.lines[2]);
+        try testing.expectEqual(@as(?i96, 4000 * ms), h.m.nextDeadline());
+        // Transient: TUI keys go through.
+        try testing.expect(has(h.key(press('o'), 1500), .toggle_stats));
+        try testing.expectEqual(0, h.tickAt(3999).len);
+        try testing.expect(has(h.tickAt(4000), .layers_changed));
+        try testing.expect(h.m.view().box == null);
+    }
 }
 
-test "Ctrl-C replaces the legacy warning, which counts as dismissed" {
+test "disabled: the menu has no i; Ctrl-C replaces the notice, and the notice doesn't replace the prompt" {
     const lv = quietLogs();
     defer testing.log_level = lv;
+    var h: Harness = .init(.{ .path = .disabled });
+    _ = h.key(press(' '), 0);
+    const items = h.m.view().menu.?;
+    try testing.expectEqual(menu_items.len - 1, items.len);
+    for (items) |item| try testing.expect(item.action != .game);
+    // `i` isn't an entry here: ignored, and the menu stays open.
+    try testing.expectEqual(0, h.key(press('i'), 1).len);
+    try testing.expect(h.m.view().menu != null);
+    _ = h.key(press(' '), 2);
+
+    _ = h.key(press('i'), 10);
+    try testing.expectEqualStrings(game_disabled_text[0], h.m.view().box.?.lines[0]);
+    _ = h.key(ctrl('c'), 20);
+    try testing.expectEqualStrings(ctrl_c_text[0], h.m.view().box.?.lines[0]);
+    _ = h.key(press('i'), 30);
+    try testing.expectEqualStrings(ctrl_c_text[0], h.m.view().box.?.lines[0]);
+    // The notice didn't take the prompt's place: a second Ctrl-C quits.
+    try testing.expect(hasQuit(h.key(ctrl('c'), 40)));
+
+    // A Ctrl-C after the notice is a first press, not a second.
+    h = .init(.{ .path = .disabled });
+    _ = h.key(press('i'), 0);
+    try testing.expect(!hasQuit(h.key(ctrl('c'), 10)));
+}
+
+test "legacy: the fixed hold through Modes" {
     var h: Harness = .init(.{ .path = .legacy });
-    const fx = h.key(ctrl('c'), 0);
-    try testing.expect(has(fx, .{ .engine = .@"resume" }));
-    const v = h.m.view();
-    try testing.expect(!v.box.?.modal);
-    try testing.expectEqualStrings(ctrl_c_text[0], v.box.?.lines[0]);
-    // Keys now reach the game.
-    _ = h.key(press('e'), 10);
-    try testing.expect(h.down(.up));
-}
-
-test "legacy: tap and hold through the guesser" {
-    const lv = quietLogs();
-    defer testing.log_level = lv;
-    var h: Harness = .init(.{ .path = .legacy });
-    _ = h.key(press('x'), 0); // dismiss
-    // Tap: held for the initial window.
+    // Tap: held for 100 ms.
     _ = h.key(press('e'), 1000);
     try testing.expect(h.down(.up));
-    try testing.expectEqual(@as(?i96, 1500 * ms), h.m.nextDeadline());
-    try testing.expectEqual(0, h.tickAt(1499).len);
+    try testing.expectEqual(@as(?i96, 1100 * ms), h.m.nextDeadline());
+    try testing.expectEqual(0, h.tickAt(1099).len);
     try testing.expect(h.down(.up));
-    _ = h.tickAt(1500);
-    try testing.expect(!h.anyDown());
+    try testing.expect(has(h.tickAt(1100), .{ .engine = .{ .set_input = @splat(false) } }));
 
-    // Hold: 400 ms delay, then 33 ms repeats: continuous, released after.
-    _ = h.key(press('f'), 2000);
-    var t: i96 = 2400;
+    // Hold: resent every 33 ms, continuous; released 100 ms after the last.
+    var t: i96 = 2000;
+    _ = h.key(press('f'), t);
+    t += 33;
     while (t < 3000) : (t += 33) {
         try testing.expectEqual(0, h.key(press('f'), t).len);
         try testing.expect(h.down(.right));
     }
     const last = t - 33;
-    _ = h.tickAt(last + 82);
+    _ = h.tickAt(last + 99);
     try testing.expect(h.down(.right));
-    _ = h.tickAt(last + 83);
+    _ = h.tickAt(last + 100);
+    try testing.expect(!h.anyDown());
+
+    // Two keys at once.
+    _ = h.key(press('e'), 4000);
+    _ = h.key(press('l'), 4050);
+    try testing.expect(h.down(.up) and h.down(.a));
+    _ = h.tickAt(4100);
+    try testing.expect(!h.down(.up) and h.down(.a));
+    _ = h.tickAt(4150);
     try testing.expect(!h.anyDown());
 
     // Unbound keys don't hold anything.
@@ -915,19 +961,16 @@ test "legacy: tap and hold through the guesser" {
     try testing.expectEqual(@as(?i96, null), h.m.nextDeadline());
 }
 
-test "legacy: a mode switch releases the guessed hold and resets the guesser" {
-    const lv = quietLogs();
-    defer testing.log_level = lv;
+test "legacy: a mode switch releases the fixed hold" {
     var h: Harness = .init(.{ .path = .legacy });
-    _ = h.key(press('x'), 0);
     _ = h.key(press('e'), 100);
     try testing.expect(h.down(.up));
     _ = h.key(ctrl(']'), 150);
     try testing.expect(!h.anyDown());
     try testing.expectEqual(@as(?i96, null), h.m.nextDeadline());
-    _ = h.key(ctrl(']'), 200);
+    _ = h.key(ctrl(']'), 160);
     try testing.expect(!h.anyDown());
-    try testing.expect(!h.m.guesser.isHeld(.{ .char = 'e' }));
+    try testing.expect(!h.m.hold.isHeld(.{ .char = 'e' }));
 }
 
 test "focus-out releases every button" {
@@ -943,45 +986,62 @@ test "focus-out releases every button" {
     try testing.expect(!h.anyDown());
 }
 
-test "automatic fallback: releases, warns, holds; then guesses" {
+test "switchToDisabled: releases, pauses, the box consumes its key, p resumes" {
     const lv = quietLogs();
     defer testing.log_level = lv;
     var h: Harness = .init(.{ .path = .kitty });
     _ = h.key(press('e'), 0);
     try testing.expect(h.down(.up));
     h.out.clear();
-    h.m.switchToLegacy(h.paused, &h.out);
+    h.m.switchToDisabled(h.paused, &h.out);
     h.apply();
     try testing.expect(!h.anyDown());
     try testing.expect(h.paused);
-    const v = h.m.view();
-    try testing.expect(v.legacy and v.box.?.modal);
+    var v = h.m.view();
+    try testing.expectEqual(Mode.tui, v.mode);
+    try testing.expectEqual(Flag.game_disabled, v.flag);
+    try testing.expect(v.box.?.modal);
+    try testing.expectEqualStrings(input_lost_text[0], v.box.?.lines[0]);
     // A second call does nothing.
     h.out.clear();
-    h.m.switchToLegacy(h.paused, &h.out);
+    h.m.switchToDisabled(h.paused, &h.out);
     try testing.expectEqual(0, h.out.len);
-    // Dismiss: the engine resumes; Esc is no longer the mode key.
-    try testing.expect(has(h.key(press('x'), 10), .{ .engine = .@"resume" }));
-    _ = h.key(named(.escape), 20);
-    try testing.expectEqual(Mode.game, h.m.view().mode);
-    _ = h.key(press('e'), 30);
-    try testing.expect(h.down(.up));
-    _ = h.tickAt(530);
+    // The dismissing key (p) is consumed: no resume.
+    const fx = h.key(press('p'), 10);
+    try testing.expect(!has(fx, .{ .engine = .@"resume" }));
+    try testing.expect(h.paused);
+    try testing.expect(h.m.view().box == null);
+    // `p` resumes; game mode stays out of reach.
+    try testing.expect(has(h.key(press('p'), 20), .{ .engine = .@"resume" }));
+    _ = h.key(named(.escape), 30);
+    _ = h.key(press('i'), 40);
+    v = h.m.view();
+    try testing.expectEqual(Mode.tui, v.mode);
+    try testing.expectEqualStrings(game_disabled_text[0], v.box.?.lines[0]);
+    _ = h.key(press('e'), 50);
     try testing.expect(!h.anyDown());
 }
 
-test "fallback while the user has paused: dismissing doesn't resume" {
+test "switchToDisabled while paused, from the menu; Ctrl-C replaces the box" {
     const lv = quietLogs();
     defer testing.log_level = lv;
     var h: Harness = .init(.{ .path = .kitty });
     _ = h.key(named(.escape), 0);
     _ = h.key(press('p'), 1);
+    _ = h.key(press(' '), 2);
     try testing.expect(h.paused);
     h.out.clear();
-    h.m.switchToLegacy(h.paused, &h.out);
+    h.m.switchToDisabled(h.paused, &h.out);
+    try testing.expect(!has(h.out.slice(), .{ .engine = .pause }));
     h.apply();
-    try testing.expect(!has(h.key(press('x'), 2), .{ .engine = .@"resume" }));
-    try testing.expect(h.paused);
+    try testing.expect(h.m.view().menu == null);
+    // Ctrl-C replaces it (counts as dismissed), and doesn't resume.
+    const fx = h.key(ctrl('c'), 3);
+    try testing.expect(!has(fx, .{ .engine = .@"resume" }));
+    const v = h.m.view();
+    try testing.expect(!v.box.?.modal);
+    try testing.expectEqualStrings(ctrl_c_text[0], v.box.?.lines[0]);
+    try testing.expect(hasQuit(h.key(ctrl('c'), 4)));
 }
 
 test "every menu item has a distinct key; only quit is menu-only" {

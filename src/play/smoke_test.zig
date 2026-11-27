@@ -157,8 +157,8 @@ fn runPlay(gpa: std.mem.Allocator, extra: []const [:0]const u8, script: []const 
 test "play runs the test core on a pty for --duration and exits cleanly; core stdout goes to the log" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
-    // `--keyboard kitty`: nothing answers detection, so `auto` would take
-    // the legacy path, whose warning holds the game paused.
+    // `--keyboard kitty`, for the push, pop and focus bytes: nothing
+    // answers detection, so `auto` would disable game input.
     var r = try runPlay(gpa, &.{ "--duration", "1.5", "--keyboard", "kitty", "--option", "temui_test_stdout_marker=on" }, &.{});
     defer r.deinit(gpa);
     const out = r.out.items;
@@ -197,12 +197,10 @@ test "play: the leader menu's quit, confirmed with Enter, quits normally" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const t0 = std.Io.Clock.awake.now(testing.io).nanoseconds;
-    // Legacy path (nothing answers detection): any key dismisses the
-    // warning, then Ctrl-], Space, q, Enter.
+    // `auto`, and nothing answers detection: game input is disabled, so
+    // play starts in TUI mode. Space, q, Enter.
     var r = try runPlay(gpa, &.{ "--duration", "15" }, &.{
-        .{ .after_ms = 300, .bytes = "x" },
-        .{ .after_ms = 150, .bytes = "\x1d" },
-        .{ .after_ms = 150, .bytes = " " },
+        .{ .after_ms = 300, .bytes = " " },
         .{ .after_ms = 150, .bytes = "q" },
         .{ .after_ms = 150, .bytes = "\r" },
     });
@@ -216,7 +214,9 @@ test "play: the leader menu's quit, confirmed with Enter, quits normally" {
     try testing.expect(elapsed < 10 * std.time.ns_per_s);
     const leave = std.mem.indexOf(u8, r.out.items, "\x1b[?1049l") orelse return error.NoAltScreenLeave;
     _ = try summaryFrames(r.out.items, leave);
-    try expectContains(r.log_text, "info(play): keyboard: legacy (detected)");
+    try expectContains(r.log_text, "info(play): keyboard: disabled (no kitty keyboard protocol detected)");
+    // The flag, white on red.
+    try expectBetween(r.out.items, 0, leave, "\x1b[97;41mGAME MODE DISABLED\x1b[0m");
     try expectContains(r.log_text, "info(input): menu opened");
     try expectContains(r.log_text, "info(input): quit confirmed");
     if (std.mem.indexOf(u8, r.log_text, "--duration reached") != null) return error.QuitByDuration;
@@ -225,12 +225,10 @@ test "play: the leader menu's quit, confirmed with Enter, quits normally" {
 test "play: a core stuck in retro_run quits on two Ctrl-Cs via the watchdog" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
-    // The legacy warning holds the engine paused, so the core reaches the
-    // hang only once a key dismisses it. 30 frames is 0.5 s; the Ctrl-Cs
-    // are sent well after, so the loop is stuck by then.
+    // 30 frames is 0.5 s; the Ctrl-Cs are sent well after, so the loop is
+    // stuck by then.
     var r = try runPlay(gpa, &.{ "--duration", "15", "--option", "temui_test_hang_after=30" }, &.{
-        .{ .after_ms = 300, .bytes = "x" },
-        .{ .after_ms = 1500, .bytes = "\x03\x03" },
+        .{ .after_ms = 1800, .bytes = "\x03\x03" },
     });
     defer r.deinit(gpa);
     if (r.exitCode() != 130) {
