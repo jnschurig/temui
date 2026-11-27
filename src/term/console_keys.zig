@@ -321,11 +321,11 @@ test "every input path gives the same events for the same physical action" {
         var console_buf: [8]Event = undefined;
 
         var kd: key_decoder.Decoder = .init(.kitty);
-        kd.acked = true;
+        kd.query = null;
         var kn: usize = 0;
         var kit = kd.feed(a.kitty, 0);
         while (kit.next()) |in| : (kn += 1) kitty_buf[kn] = in.key;
-        try testing.expect(!kd.sawLegacyKey());
+        try testing.expect(!kd.wantsQuery());
 
         var ld: key_decoder.Decoder = .init(.legacy);
         var ln: usize = 0;

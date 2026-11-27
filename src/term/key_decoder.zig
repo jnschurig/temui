@@ -7,11 +7,18 @@
 //! the functional keys the protocol still sends in legacy form (`CSI 1;mods:
 //! event A–D/H/F/P–S`, `CSI n;mods:event ~`), with press, repeat and
 //! release. With flag 8 the terminal never sends a key as a plain byte, so
-//! one arriving means the protocol isn't active: `sawLegacyKey` reports it
-//! and the loop falls back to legacy. Until the push is acknowledged (the
-//! reply to `CSI ? u`, or the DA1 sentinel after it) plain keys are dropped
-//! and not counted, since they may predate the push. Ctrl-C always gets
-//! through.
+//! one arriving suggests the protocol is gone, but doesn't prove it (the
+//! rest of a sequence split across slow reads looks the same). Such keys
+//! are dropped, and `wantsQuery` asks the loop to send the terminal
+//! `session.kitty_query`; the answer (`takeAnswer`) decides. While a query
+//! is out, keys in legacy form are dropped too: they may predate the push,
+//! or be the tail of a split sequence. Ctrl-C always gets through.
+//!
+//! **Queries** (both modes): the reply to `CSI ? u` and the DA1 sentinel
+//! after it answer the query that is out. Nonzero flags mean the protocol
+//! is active; zero flags, or DA1 alone, mean it isn't. The session's query
+//! at enter is out from `init` in kitty mode; the loop's later ones, from
+//! `querySent`, are taken as unanswered after `query_timeout_ns`.
 //!
 //! **Legacy mode** decodes printable ASCII and UTF-8, Enter, Tab, Backspace,
 //! Ctrl chords, CSI/SS3 navigation keys with modifier parameters, and ESC +
@@ -48,6 +55,22 @@ pub const stale_ns: i96 = 100 * std.time.ns_per_ms;
 /// Terminals send a paste in a burst.
 pub const paste_idle_ns: i96 = 500 * std.time.ns_per_ms;
 
+/// How long a query sent by the loop may go unanswered before the protocol
+/// is taken as inactive. Every terminal answers DA1, so this only matters
+/// for a terminal that stopped answering, or a very slow link.
+pub const query_timeout_ns: i96 = 2 * std.time.ns_per_s;
+
+/// The terminal's answer to a kitty keyboard query.
+pub const Answer = enum { active, inactive };
+
+const Query = struct {
+    /// When the loop sent it; null for the session's own query at enter,
+    /// which never times out.
+    sent_ns: ?i96,
+    /// The flags the terminal reported, once its `CSI ? flags u` arrived.
+    flags: ?u32 = null,
+};
+
 const paste_end = "\x1b[201~";
 
 const log = std.log.scoped(.input);
@@ -64,9 +87,12 @@ pub const Decoder = struct {
     parser: replies.Parser = .{},
     /// When the last input arrived.
     last_ns: ?i96 = null,
-    /// Kitty mode: the push was acknowledged, so plain keys count.
-    acked: bool = false,
-    saw_legacy: bool = false,
+    /// The kitty keyboard query out, if any.
+    query: ?Query = null,
+    /// The last query's answer, until `takeAnswer`.
+    answer: ?Answer = null,
+    /// Kitty mode: a key arrived in legacy form with no query out.
+    suspect: bool = false,
     /// A partial UTF-8 character (legacy input).
     utf8: [4]u8 = undefined,
     utf8_len: u3 = 0,
@@ -77,20 +103,39 @@ pub const Decoder = struct {
     /// Inside a bracketed paste.
     paste: ?Paste = null,
 
+    /// In kitty mode, the session's query at enter is out.
     pub fn init(mode: Mode) Decoder {
-        return .{ .mode = mode, .acked = mode == .legacy };
+        return .{ .mode = mode, .query = if (mode == .kitty) .{ .sent_ns = null } else null };
     }
 
-    /// Kitty mode: a key arrived in legacy form after the push was
-    /// acknowledged, or the terminal answered that the protocol is off.
-    pub fn sawLegacyKey(d: *const Decoder) bool {
-        return d.saw_legacy;
+    /// Kitty mode: a key arrived in legacy form, so the protocol may be
+    /// gone. Send `session.kitty_query`, then call `querySent`.
+    pub fn wantsQuery(d: *const Decoder) bool {
+        return d.suspect;
     }
 
-    /// Decodes in legacy mode from now on (the automatic fallback).
+    /// The loop sent `session.kitty_query` at `now_ns`.
+    pub fn querySent(d: *Decoder, now_ns: i96) void {
+        d.suspect = false;
+        d.query = .{ .sent_ns = now_ns };
+    }
+
+    /// The answer to the last query, once; null while none has come.
+    pub fn takeAnswer(d: *Decoder) ?Answer {
+        defer d.answer = null;
+        return d.answer;
+    }
+
+    /// Decodes in legacy mode from now on (the protocol is gone).
     pub fn switchToLegacy(d: *Decoder) void {
         d.mode = .legacy;
-        d.acked = true;
+        d.suspect = false;
+    }
+
+    /// Decodes in kitty mode from now on (a recheck found the protocol).
+    pub fn switchToKitty(d: *Decoder) void {
+        d.mode = .kitty;
+        d.suspect = false;
     }
 
     /// The inputs in `bytes`, read at `now_ns`, in order. Parser state
@@ -110,9 +155,20 @@ pub const Decoder = struct {
         return .{ .d = d, .rest = bytes };
     }
 
-    /// When a held lone ESC goes stale, or a paste is taken as ended (call
-    /// `expire` then), or null.
+    /// When a held lone ESC goes stale, a paste is taken as ended or a query
+    /// times out (call `expire` then), or null.
     pub fn deadline(d: *const Decoder) ?i96 {
+        const q = d.queryDeadline();
+        const i = d.inputDeadline() orelse return q;
+        return if (q) |x| @min(x, i) else i;
+    }
+
+    fn queryDeadline(d: *const Decoder) ?i96 {
+        const q = d.query orelse return null;
+        return (q.sent_ns orelse return null) + query_timeout_ns;
+    }
+
+    fn inputDeadline(d: *const Decoder) ?i96 {
         const last = d.last_ns orelse return null;
         if (d.paste != null) return last + paste_idle_ns;
         if (!d.parser.pendingLoneEsc()) return null;
@@ -120,9 +176,15 @@ pub const Decoder = struct {
     }
 
     /// Esc, if a lone ESC has been held for `stale_ns` by `now_ns`. Ends a
-    /// paste that has gone `paste_idle_ns` without a byte.
+    /// paste that has gone `paste_idle_ns` without a byte. A query out for
+    /// `query_timeout_ns` is answered `inactive`.
     pub fn expire(d: *Decoder, now_ns: i96) ?Input {
-        const dl = d.deadline() orelse return null;
+        if (d.queryDeadline()) |qd| if (now_ns >= qd) {
+            log.warn("no answer to the kitty keyboard query in {d} ms; taking the protocol as inactive", .{@divTrunc(query_timeout_ns, std.time.ns_per_ms)});
+            d.query = null;
+            d.answer = .inactive;
+        };
+        const dl = d.inputDeadline() orelse return null;
         if (now_ns < dl) return null;
         if (d.paste) |p| {
             log.warn("paste: no end marker after {d} bytes; taking it as ended", .{p.bytes});
@@ -155,12 +217,16 @@ pub const Decoder = struct {
         return if (esc) d.legacy(.{ .key = .named(.escape) }) else null;
     }
 
-    /// Passes a legacy-form input through the kitty-mode rule.
+    /// Passes a legacy-form input through the kitty-mode rule: dropped, and
+    /// suspected unless a query is already out.
     fn legacy(d: *Decoder, in: Input) ?Input {
         if (d.mode == .legacy) return in;
-        if (!d.acked) return null;
-        d.saw_legacy = true;
-        return in;
+        d.suspectLegacy();
+        return null;
+    }
+
+    fn suspectLegacy(d: *Decoder) void {
+        if (d.mode == .kitty and d.query == null) d.suspect = true;
     }
 
     pub const Iterator = struct {
@@ -184,8 +250,8 @@ pub const Decoder = struct {
                     d.parser = .{};
                     d.utf8_need = 0;
                     const ctrl_c: Input = .{ .key = .{ .key = .{ .char = 'c' }, .mods = .{ .ctrl = true } } };
-                    // Ctrl-C always gets through, even before the ack.
-                    if (d.mode == .kitty and d.acked) d.saw_legacy = true;
+                    // Ctrl-C always gets through, even with a query out.
+                    d.suspectLegacy();
                     return ctrl_c;
                 }
                 const e = d.parser.feed(b) orelse continue;
@@ -199,17 +265,14 @@ pub const Decoder = struct {
         switch (e.kind) {
             .byte => return d.byte(e.raw[0], false),
             .kitty_keyboard => {
-                if (d.mode == .kitty) {
-                    d.acked = true;
-                    if ((e.keyboardFlags() orelse 0) == 0) d.saw_legacy = true;
-                }
+                if (d.query) |*q| q.flags = e.keyboardFlags() orelse 0;
                 return null;
             },
             .da1 => {
-                // The sentinel after `CSI ? u`: no kitty reply came first.
-                if (d.mode == .kitty and !d.acked) {
-                    d.acked = true;
-                    d.saw_legacy = true;
+                // The sentinel after `CSI ? u`, which ends the query.
+                if (d.query) |q| {
+                    d.query = null;
+                    d.answer = if ((q.flags orelse 0) != 0) .active else .inactive;
                 }
                 return null;
             },
@@ -517,7 +580,7 @@ fn expectDecode(mode: Mode, input: []const u8, want: []const Input) !void {
     var chunk: usize = 1;
     while (chunk <= @max(input.len, 1)) : (chunk += 1) {
         var d: Decoder = .init(mode);
-        d.acked = true;
+        d.query = null;
         try expectInputsEql(want, try collect(&d, input, chunk, &buf));
     }
 }
@@ -787,48 +850,114 @@ test "Ctrl-C resets inside any unfinished sequence, on both paths" {
     }
 }
 
-test "kitty: plain keys before the ack are dropped and don't count" {
+test "kitty: keys in legacy form are dropped while the query at enter is out" {
     var buf: [8]Input = undefined;
     var d: Decoder = .init(.kitty);
     try expectInputsEql(&.{ key(ch('c'), ctrl, .press), key(ch('e'), none, .press) }, feedAll(&d, "x\x1bOA\x03\x1b[101u", 0, &buf));
-    try testing.expect(!d.sawLegacyKey());
-    // The ack; then a plain byte counts (and still comes through).
-    try expectInputsEql(&.{key(ch('x'), none, .press)}, feedAll(&d, "\x1b[?15ux", 0, &buf));
-    try testing.expect(d.sawLegacyKey());
+    try testing.expect(!d.wantsQuery());
+    try testing.expectEqual(null, d.takeAnswer());
+    // The query at enter never times out.
+    try testing.expectEqual(null, d.deadline());
+    // The answer; then a plain byte is dropped and asks for a query.
+    try expectInputsEql(&.{}, feedAll(&d, "\x1b[?15u\x1b[?62c", 0, &buf));
+    try testing.expectEqual(Answer.active, d.takeAnswer().?);
+    try testing.expectEqual(null, d.takeAnswer());
+    try expectInputsEql(&.{}, feedAll(&d, "x", 0, &buf));
+    try testing.expect(d.wantsQuery());
 }
 
-test "kitty: the fallback triggers on a flags-0 reply or DA1 without a reply" {
+test "kitty: the answer is active for nonzero flags, inactive for zero flags or DA1 alone" {
+    var buf: [8]Input = undefined;
+    const cases = [_]struct { reply: []const u8, want: Answer }{
+        .{ .reply = "\x1b[?15u\x1b[?62;22c", .want = .active },
+        .{ .reply = "\x1b[?0u\x1b[?62c", .want = .inactive },
+        .{ .reply = "\x1b[?62;22c", .want = .inactive },
+    };
+    for (cases) |c| {
+        var d: Decoder = .init(.kitty);
+        _ = feedAll(&d, c.reply, 0, &buf);
+        try testing.expectEqual(c.want, d.takeAnswer().?);
+        // With no query out, a late reply answers nothing.
+        _ = feedAll(&d, c.reply, 0, &buf);
+        try testing.expectEqual(null, d.takeAnswer());
+    }
+}
+
+test "kitty: a key in legacy form asks for a query; the answer decides" {
     var buf: [8]Input = undefined;
     var d: Decoder = .init(.kitty);
-    _ = feedAll(&d, "\x1b[?0u\x1b[?62c", 0, &buf);
-    try testing.expect(d.sawLegacyKey());
+    d.query = null;
+    // Kitty-form keys never count; Ctrl-C as 0x03 comes through and does.
+    try expectInputsEql(&.{ key(ch('e'), none, .press), key(nm(.up), none, .press), key(nm(.up), ctrl, .release) }, feedAll(&d, "\x1b[101u\x1b[A\x1b[1;5:3A", 0, &buf));
+    try testing.expect(!d.wantsQuery());
+    try expectInputsEql(&.{key(ch('c'), ctrl, .press)}, feedAll(&d, "\x03", 0, &buf));
+    try testing.expect(d.wantsQuery());
+    d.querySent(10);
+    try testing.expect(!d.wantsQuery());
+    try testing.expectEqual(@as(?i96, 10 + query_timeout_ns), d.deadline());
+    // While it is out, keys in legacy form are dropped and ask for nothing
+    // more; kitty-form keys still come through.
+    try expectInputsEql(&.{key(ch('f'), none, .press)}, feedAll(&d, "x\x1b[102u", 20, &buf));
+    try testing.expect(!d.wantsQuery());
+    // Still active: a false alarm.
+    _ = feedAll(&d, "\x1b[?15u\x1b[?62c", 30, &buf);
+    try testing.expectEqual(Answer.active, d.takeAnswer().?);
+    try testing.expectEqual(null, d.deadline());
 
-    d = .init(.kitty);
-    _ = feedAll(&d, "\x1b[?62;22c", 0, &buf);
-    try testing.expect(d.sawLegacyKey());
-
-    // Reply then DA1: supported.
-    d = .init(.kitty);
-    _ = feedAll(&d, "\x1b[?15u\x1b[?62;22c", 0, &buf);
-    try testing.expect(!d.sawLegacyKey());
-    // Kitty-form keys never count, Ctrl-C as 0x03 does.
-    _ = feedAll(&d, "\x1b[101u\x1b[A\x1b[1;5:3A", 0, &buf);
-    try testing.expect(!d.sawLegacyKey());
-    _ = feedAll(&d, "\x03", 0, &buf);
-    try testing.expect(d.sawLegacyKey());
-
-    // After switchToLegacy, bytes decode as legacy keys.
+    // Gone this time; after switchToLegacy, bytes decode as legacy keys.
+    _ = feedAll(&d, "y", 40, &buf);
+    try testing.expect(d.wantsQuery());
+    d.querySent(40);
+    _ = feedAll(&d, "\x1b[?62c", 50, &buf);
+    try testing.expectEqual(Answer.inactive, d.takeAnswer().?);
     d.switchToLegacy();
-    try expectInputsEql(&.{key(ch('e'), none, .press)}, feedAll(&d, "e", 0, &buf));
+    try expectInputsEql(&.{key(ch('e'), none, .press)}, feedAll(&d, "e", 60, &buf));
 }
 
-test "kitty: a stale lone ESC counts as legacy" {
+test "kitty: a sequence split across slow reads is a false alarm" {
+    var buf: [8]Input = undefined;
     var d: Decoder = .init(.kitty);
-    d.acked = true;
-    var buf: [4]Input = undefined;
+    d.query = null;
     _ = feedAll(&d, "\x1b", 0, &buf);
-    try expectInputsEql(&.{key(nm(.escape), none, .press)}, &.{d.expire(stale_ns).?});
-    try testing.expect(d.sawLegacyKey());
+    // The lone ESC goes stale: dropped, and a query is asked for.
+    try testing.expectEqual(null, d.expire(stale_ns));
+    try testing.expect(d.wantsQuery());
+    d.querySent(stale_ns);
+    // The rest of the sequence arrives as plain bytes: dropped.
+    try expectInputsEql(&.{}, feedAll(&d, "[101u", stale_ns + 50 * std.time.ns_per_ms, &buf));
+    try testing.expect(!d.wantsQuery());
+    _ = feedAll(&d, "\x1b[?15u\x1b[?62c", stale_ns + 60 * std.time.ns_per_ms, &buf);
+    try testing.expectEqual(Answer.active, d.takeAnswer().?);
+    try expectInputsEql(&.{key(ch('e'), none, .release)}, feedAll(&d, "\x1b[101;1:3u", stale_ns + 70 * std.time.ns_per_ms, &buf));
+}
+
+test "a query unanswered for query_timeout_ns is answered inactive" {
+    // The warning is expected.
+    const lv = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = lv;
+    var d: Decoder = .init(.legacy);
+    d.querySent(0);
+    try testing.expectEqual(@as(?i96, query_timeout_ns), d.deadline());
+    try testing.expectEqual(null, d.expire(query_timeout_ns - 1));
+    try testing.expectEqual(null, d.takeAnswer());
+    try testing.expectEqual(null, d.expire(query_timeout_ns));
+    try testing.expectEqual(Answer.inactive, d.takeAnswer().?);
+    try testing.expectEqual(null, d.deadline());
+}
+
+test "legacy: a recheck finds the protocol; then kitty mode's rule applies" {
+    var buf: [8]Input = undefined;
+    var d: Decoder = .init(.legacy);
+    d.querySent(0);
+    // Keys still come through while it is out.
+    try expectInputsEql(&.{key(ch('i'), none, .press)}, feedAll(&d, "i", 1, &buf));
+    _ = feedAll(&d, "\x1b[?15u\x1b[?62c", 2, &buf);
+    try testing.expectEqual(Answer.active, d.takeAnswer().?);
+    d.switchToKitty();
+    try expectInputsEql(&.{key(ch('e'), none, .press)}, feedAll(&d, "\x1b[101u", 3, &buf));
+    try expectInputsEql(&.{}, feedAll(&d, "x", 4, &buf));
+    try testing.expect(d.wantsQuery());
 }
 
 test "paste: discarded in both modes, split at any boundary; a key after it is decoded" {
@@ -845,10 +974,10 @@ test "paste: discarded in both modes, split at any boundary; a key after it is d
     });
     // Pasted plain bytes never count as legacy keys on the kitty path.
     var d: Decoder = .init(.kitty);
-    d.acked = true;
+    d.query = null;
     var buf: [8]Input = undefined;
     try testing.expectEqual(0, (try collect(&d, paste, 1, &buf)).len);
-    try testing.expect(!d.sawLegacyKey());
+    try testing.expect(!d.wantsQuery());
     try testing.expectEqual(@as(?Paste, null), d.paste);
 }
 
@@ -859,7 +988,7 @@ test "paste: a start marker with no end is ended after 500 ms without a byte" {
     defer testing.log_level = lv;
     const ms = std.time.ns_per_ms;
     var d: Decoder = .init(.kitty);
-    d.acked = true;
+    d.query = null;
     var it = d.feed("\x1b[200~abc", 0);
     try testing.expectEqual(null, it.next());
     try testing.expectEqual(@as(?i96, 500 * ms), d.deadline());

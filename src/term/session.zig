@@ -148,10 +148,34 @@ var in_fd: Fd = undefined;
 var out_fd: Fd = undefined;
 var saved: ?Saved = null;
 var cleanup: []const u8 = "";
+/// `cleanup` with the kitty pop, for once `requestKittyFlags` has pushed
+/// flags that `enter` didn't.
+var cleanup_pop: []const u8 = "";
+/// Whether kitty keyboard flags are pushed: `restore` then writes
+/// `cleanup_pop`.
+var kitty_pushed: std.atomic.Value(bool) = .init(false);
 /// `buildStrings` output, kept for the life of the process: `cleanup`
-/// points into it, and signal handlers read it.
+/// and `cleanup_pop` point into it, and signal handlers read it.
 var enter_buf: [max_string_len]u8 = undefined;
 var cleanup_buf: [max_string_len]u8 = undefined;
+var cleanup_pop_buf: [max_string_len]u8 = undefined;
+
+/// Builds the strings for `opts` into the buffers above and sets
+/// `cleanup`, `cleanup_pop` and `kitty_pushed`. Returns the enter string.
+fn setStrings(opts: Options) []const u8 {
+    const strings = buildStrings(opts, &enter_buf, &cleanup_buf);
+    cleanup = strings.cleanup;
+    var with_pop = opts;
+    if (with_pop.kitty_keyboard_flags == null) with_pop.kitty_keyboard_flags = 1; // any: only the cleanup is kept
+    var scratch: [max_string_len]u8 = undefined;
+    cleanup_pop = buildStrings(with_pop, &scratch, &cleanup_pop_buf).cleanup;
+    kitty_pushed.store(opts.kitty_keyboard_flags != null, .release);
+    return strings.enter;
+}
+
+fn cleanupNow() []const u8 {
+    return if (kitty_pushed.load(.acquire)) cleanup_pop else cleanup;
+}
 var handlers_installed = false;
 /// Containment state (POSIX): set by `enter` before `active`, cleared by
 /// `restore`. `saved_err` is a duplicate of the original fd 2; `out_fd` is
@@ -177,11 +201,10 @@ pub fn enter(opts: Options) EnterError!void {
             return error.ContainFailed;
         };
     }
-    const strings = buildStrings(opts, &enter_buf, &cleanup_buf);
-    cleanup = strings.cleanup;
+    const enter_str = setStrings(opts);
     active.store(true, .release);
     installHandlers();
-    if (strings.enter.len > 0 and !writeAll(out_fd, strings.enter)) {
+    if (enter_str.len > 0 and !writeAll(out_fd, enter_str)) {
         restore();
         return error.WriteFailed;
     }
@@ -209,6 +232,24 @@ pub fn writeOut(bytes: []const u8) error{WriteFailed}!void {
     if (!writeAll(out_fd, bytes)) return error.WriteFailed;
 }
 
+/// Asks the terminal for the kitty keyboard protocol again (a recheck
+/// before game mode, item 06), then sends `kitty_query`. Pushes `flags` if
+/// none are pushed yet, and from then on `restore` pops them. Otherwise
+/// sets them on the entry already pushed (`CSI = flags ; 1 u`), so repeated
+/// rechecks never grow the stack. POSIX, with a session active.
+pub fn requestKittyFlags(flags: u8) error{WriteFailed}!void {
+    var buf: [32]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    // Marked first: a pop with nothing pushed only empties the stack.
+    if (kitty_pushed.swap(true, .acq_rel)) {
+        w.print("\x1b[={d};1u", .{flags}) catch unreachable;
+    } else {
+        w.print("\x1b[>{d}u", .{flags}) catch unreachable;
+    }
+    w.writeAll(kitty_query) catch unreachable;
+    try writeOut(w.buffered());
+}
+
 /// The non-blocking read end of the containment pipe (`contain_stdio =
 /// .pipe`), or null. The caller drains it and owns it after `restore`.
 pub fn stdioPipe() ?Fd {
@@ -233,7 +274,7 @@ extern "c" fn fflush(stream: ?*anyopaque) c_int;
 /// with no session (does nothing).
 pub fn restore() void {
     if (!active.swap(false, .acq_rel)) return;
-    _ = writeAll(out_fd, cleanup);
+    _ = writeAll(out_fd, cleanupNow());
     if (!is_windows and contained) {
         contained = false;
         _ = c.dup2(out_fd, 1);
@@ -269,7 +310,7 @@ pub fn restoreBestEffort() void {
     if (!active.swap(false, .acq_rel)) return;
     var fds = [_]c.pollfd{.{ .fd = out_fd, .events = c.POLL.OUT, .revents = 0 }};
     // The cleanup is shorter than PIPE_BUF, so a writable fd takes it whole.
-    if (c.poll(&fds, 1, 200) == 1 and fds[0].revents & c.POLL.OUT != 0) _ = writeAll(out_fd, cleanup);
+    if (c.poll(&fds, 1, 200) == 1 and fds[0].revents & c.POLL.OUT != 0) _ = writeAll(out_fd, cleanupNow());
     if (contained) {
         contained = false;
         _ = c.dup2(out_fd, 1);
@@ -521,7 +562,7 @@ fn fakeSession(opts: Options) ![2]c.fd_t {
     if (c.pipe(&fds) != 0) return error.PipeFailed;
     out_fd = fds[1];
     saved = null;
-    cleanup = buildStrings(opts, &enter_buf, &cleanup_buf).cleanup;
+    _ = setStrings(opts);
     active.store(true, .release);
     return fds;
 }
@@ -606,6 +647,41 @@ test "restore writes the cleanup once and is idempotent" {
     // The pop and focus-off happen on the alt screen, before leaving it.
     try testing.expect(std.mem.indexOf(u8, got, kitty_pop).? < std.mem.indexOf(u8, got, "\x1b[?1049l").?);
     try testing.expect(std.mem.indexOf(u8, got, focus_off).? < std.mem.indexOf(u8, got, "\x1b[?1049l").?);
+}
+
+test "requestKittyFlags pushes once, then sets; restore pops what was pushed" {
+    if (is_windows) return error.SkipZigTest;
+    var buf: [256]u8 = undefined;
+    // Nothing pushed at enter: the first request pushes, later ones set.
+    {
+        const fds = try fakeSession(.{ .focus_events = true });
+        defer _ = c.close(fds[0]);
+        defer _ = c.close(fds[1]);
+        try requestKittyFlags(15);
+        try testing.expectEqualStrings("\x1b[>15u" ++ kitty_query, try readAll(fds[0], &buf));
+        try requestKittyFlags(15);
+        try testing.expectEqualStrings("\x1b[=15;1u" ++ kitty_query, try readAll(fds[0], &buf));
+        restore();
+        try testing.expectEqualStrings(string_terminator ++ focus_off ++ kitty_pop ++ leave_alt, try readAll(fds[0], &buf));
+    }
+    // Pushed at enter: a request sets, and restore pops once.
+    {
+        const fds = try fakeSession(.{ .kitty_keyboard_flags = 15 });
+        defer _ = c.close(fds[0]);
+        defer _ = c.close(fds[1]);
+        try requestKittyFlags(15);
+        try testing.expectEqualStrings("\x1b[=15;1u" ++ kitty_query, try readAll(fds[0], &buf));
+        restore();
+        try testing.expectEqualStrings(string_terminator ++ kitty_pop ++ leave_alt, try readAll(fds[0], &buf));
+    }
+    // Never requested: no pop.
+    {
+        const fds = try fakeSession(.{ .focus_events = true });
+        defer _ = c.close(fds[0]);
+        defer _ = c.close(fds[1]);
+        restore();
+        try testing.expectEqualStrings(string_terminator ++ focus_off ++ leave_alt, try readAll(fds[0], &buf));
+    }
 }
 
 test "restoreBestEffort gives up on a terminal that stopped reading" {

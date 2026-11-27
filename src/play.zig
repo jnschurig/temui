@@ -278,7 +278,7 @@ pub fn run(
         if (is_windows) {
             for (wake.keys) |in| {
                 modes.handle(in, t, engine.paused(), &fx);
-                if (applyEffects(&fx, &engine, &viewer, t)) break :loop;
+                if (applyEffects(&fx, &engine, &viewer, &decoder, t)) break :loop;
             }
         } else {
             // Raw bytes, for recording terminals' key sequences as test
@@ -287,18 +287,20 @@ pub fn run(
             var it = decoder.feed(wake.input, t);
             while (it.next()) |in| {
                 modes.handle(in, t, engine.paused(), &fx);
-                if (applyEffects(&fx, &engine, &viewer, t)) break :loop;
+                if (applyEffects(&fx, &engine, &viewer, &decoder, t)) break :loop;
             }
             if (decoder.expire(t)) |in| modes.handle(in, t, engine.paused(), &fx);
-            if (modes.path == .kitty and decoder.sawLegacyKey()) {
-                log.warn("the kitty keyboard protocol isn't active (a key arrived in legacy form)", .{});
-                // TUI keys still arrive, in legacy form.
-                decoder.switchToLegacy();
-                modes.switchToDisabled(engine.paused(), &fx);
+            if (decoder.wantsQuery()) {
+                // A key in legacy form: maybe the protocol is gone, maybe
+                // the tail of a split sequence. The terminal says which.
+                log.info("a key arrived in legacy form; asking the terminal for the kitty keyboard flags", .{});
+                session.writeOut(session.kitty_query) catch |err| log.warn("kitty keyboard query: {t}", .{err});
+                decoder.querySent(t);
             }
+            if (decoder.takeAnswer()) |answer| keyboardAnswer(answer, &decoder, &modes, engine.paused(), t, &fx);
         }
         modes.tick(t, &fx);
-        if (applyEffects(&fx, &engine, &viewer, t)) break :loop;
+        if (applyEffects(&fx, &engine, &viewer, &decoder, t)) break :loop;
     }
 
     const now = clock.now();
@@ -308,8 +310,34 @@ pub fn run(
     log.info("summary: {s}", .{std.mem.trimEnd(u8, summary.buffered(), "\n")});
 }
 
+/// The terminal's answer to a kitty keyboard query (POSIX): the one at
+/// enter, one after a key in legacy form, or a recheck before game mode.
+fn keyboardAnswer(answer: key_decoder.Answer, decoder: *key_decoder.Decoder, modes: *Modes, paused: bool, t: i96, fx: *Modes.Effects) void {
+    if (modes.rechecking) {
+        if (answer == .active) decoder.switchToKitty();
+        modes.recheckDone(answer == .active, t, fx);
+        return;
+    }
+    switch (answer) {
+        .active => log.debug("kitty keyboard protocol active", .{}),
+        .inactive => if (modes.path == .kitty) {
+            log.warn("the kitty keyboard protocol isn't active", .{});
+            // TUI keys still arrive, in legacy form.
+            decoder.switchToLegacy();
+            modes.switchToDisabled(paused, fx);
+        },
+    }
+}
+
+/// Asks the terminal for the kitty keyboard protocol again, for a recheck
+/// before game mode (POSIX). A failed write leaves the query to time out.
+fn recheckKeyboard(decoder: *key_decoder.Decoder, t: i96) void {
+    session.requestKittyFlags(kitty_flags) catch |err| log.warn("kitty keyboard recheck: {t}", .{err});
+    decoder.querySent(t);
+}
+
 /// Carries out `Modes`' effects, then clears them. Returns true to quit.
-fn applyEffects(fx: *Modes.Effects, engine: *Engine, viewer: *Viewer, t: i96) bool {
+fn applyEffects(fx: *Modes.Effects, engine: *Engine, viewer: *Viewer, decoder: *key_decoder.Decoder, t: i96) bool {
     defer fx.clear();
     var quit = false;
     for (fx.slice()) |e| switch (e) {
@@ -322,6 +350,8 @@ fn applyEffects(fx: *Modes.Effects, engine: *Engine, viewer: *Viewer, t: i96) bo
         .layers_changed => viewer.statusChanged(),
         .toggle_stats => viewer.toggleStats(),
         .force_present => viewer.forcePresent(),
+        // Never on Windows: the console path always has releases.
+        .recheck_keyboard => if (!is_windows) recheckKeyboard(decoder, t),
         .quit => quit = true,
     };
     return quit;

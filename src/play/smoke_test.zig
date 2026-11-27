@@ -222,6 +222,42 @@ test "play: the leader menu's quit, confirmed with Enter, quits normally" {
     if (std.mem.indexOf(u8, r.log_text, "--duration reached") != null) return error.QuitByDuration;
 }
 
+test "play: game input disabled, `i` rechecks the protocol: refused, then found and entered" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    // Nothing answers detection, so game input starts disabled. The script
+    // answers the rechecks: DA1 alone (no protocol), then flags 15. Then
+    // the keys are kitty-form: Esc, Space, q, Enter.
+    var r = try runPlay(gpa, &.{ "--duration", "15", "--verbose" }, &.{
+        .{ .after_ms = 300, .bytes = "i" },
+        .{ .after_ms = 150, .bytes = "\x1b[?62c" },
+        .{ .after_ms = 150, .bytes = "i" },
+        .{ .after_ms = 150, .bytes = "\x1b[?15u\x1b[?62c" },
+        .{ .after_ms = 150, .bytes = "\x1b[27u\x1b[27;1:3u" },
+        .{ .after_ms = 150, .bytes = "\x1b[32u" },
+        .{ .after_ms = 150, .bytes = "\x1b[113u" },
+        .{ .after_ms = 150, .bytes = "\x1b[13u" },
+    });
+    defer r.deinit(gpa);
+    if (r.exitCode() != 0) {
+        r.dump();
+        return error.TestUnexpectedResult;
+    }
+    const out = r.out.items;
+    const leave = std.mem.indexOf(u8, out, "\x1b[?1049l") orelse return error.NoAltScreenLeave;
+    // The first recheck pushes, the second sets; the pop comes before
+    // leaving the alternate screen.
+    const push = std.mem.indexOf(u8, out, "\x1b[>15u\x1b[?u\x1b[c") orelse return error.NoPush;
+    const set = std.mem.indexOf(u8, out, "\x1b[=15;1u\x1b[?u\x1b[c") orelse return error.NoSet;
+    try testing.expect(push < set and set < leave);
+    try expectBetween(out, set, leave + 8, "\x1b[<u");
+    try expectContains(r.log_text, "debug(input): game mode refused: game input disabled");
+    try expectContains(r.log_text, "info(input): the kitty keyboard protocol is active: game input enabled");
+    try expectContains(r.log_text, "info(input): mode: game");
+    try expectContains(r.log_text, "info(input): quit confirmed");
+    if (std.mem.indexOf(u8, r.log_text, "--duration reached") != null) return error.QuitByDuration;
+}
+
 test "play: a bracketed paste is discarded; the keys after it act" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;

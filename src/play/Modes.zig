@@ -16,7 +16,8 @@
 //! quit confirmation from every layer.
 //!
 //! Game input needs release events (D9): the kitty protocol or the Windows
-//! console. Without them (`disabled`), the run stays in TUI mode. The
+//! console. Without them (`disabled`), the run stays in TUI mode, and
+//! asking for game mode rechecks the kitty protocol first. The
 //! `legacy` path (`--keyboard legacy`, for automation) holds each press for
 //! a fixed time (`FixedHold`), in game mode only.
 //!
@@ -79,6 +80,9 @@ pub const Effect = union(enum) {
     quit,
     /// Present the next frame at once (after a step while paused).
     force_present,
+    /// Game input is disabled and game mode was asked for: ask the terminal
+    /// for the kitty keyboard protocol again, then call `recheckDone`.
+    recheck_keyboard,
 };
 
 pub const Effects = struct {
@@ -183,6 +187,8 @@ held_len: usize = 0,
 hold: FixedHold = .{},
 /// The buttons last sent with `set_input`.
 sent: host.Buttons = @splat(false),
+/// Disabled path: a recheck is out (`recheck_keyboard`).
+rechecking: bool = false,
 
 /// Starts in game mode, or in TUI mode with game input disabled.
 pub fn init(config: Config) Modes {
@@ -194,9 +200,10 @@ pub fn init(config: Config) Modes {
     return m;
 }
 
-/// Disables game input for the rest of the run (the kitty protocol turned
-/// out not to be active): every button is released, the engine is paused
-/// unless it already is, and the input-lost box opens. Dismissing it never
+/// Disables game input until a recheck finds the protocol again (the kitty
+/// protocol turned out not to be active): every button is released, the
+/// engine is paused unless it already is, and the input-lost box opens.
+/// Dismissing it never
 /// resumes; `p` does, as for any pause.
 pub fn switchToDisabled(m: *Modes, paused: bool, out: *Effects) void {
     if (!m.path.hasReleases()) return;
@@ -301,7 +308,7 @@ fn handleKey(m: *Modes, e: keys.Event, now: i96, paused: bool, out: *Effects) vo
     switch (m.mode) {
         .game => m.gameKey(e, now, out),
         .tui => if (e.kind == .press) {
-            if (m.menu_open) m.menuKey(e, now, paused, out) else m.tuiKey(e, now, paused, out);
+            if (m.menu_open) m.menuKey(e, paused, out) else m.tuiKey(e, paused, out);
         },
     }
 }
@@ -377,12 +384,12 @@ fn gameKey(m: *Modes, e: keys.Event, now: i96, out: *Effects) void {
     }
 }
 
-fn tuiKey(m: *Modes, e: keys.Event, now: i96, paused: bool, out: *Effects) void {
-    if (e.isChord(m.config.mode_key)) return m.enterGame(now, out);
+fn tuiKey(m: *Modes, e: keys.Event, paused: bool, out: *Effects) void {
+    if (e.isChord(m.config.mode_key)) return m.enterGame(out);
     if (e.mods.chord()) return;
     switch (e.key) {
         .named => |n| switch (n) {
-            .enter => m.enterGame(now, out),
+            .enter => m.enterGame(out),
             else => {}, // Esc: nothing open, nothing to back out of.
         },
         .char => {
@@ -394,12 +401,12 @@ fn tuiKey(m: *Modes, e: keys.Event, now: i96, paused: bool, out: *Effects) void 
                 return;
             }
             const item = itemFor(&menu_items, c) orelse return;
-            if (item.direct) m.run(item.action, now, paused, out);
+            if (item.direct) m.run(item.action, paused, out);
         },
     }
 }
 
-fn menuKey(m: *Modes, e: keys.Event, now: i96, paused: bool, out: *Effects) void {
+fn menuKey(m: *Modes, e: keys.Event, paused: bool, out: *Effects) void {
     if (e.mods.chord()) return;
     switch (e.key) {
         .named => |n| if (n == .escape) m.closeMenu(out),
@@ -408,12 +415,12 @@ fn menuKey(m: *Modes, e: keys.Event, now: i96, paused: bool, out: *Effects) void
             if (c == ' ') return m.closeMenu(out);
             const item = itemFor(m.menu(), c) orelse return;
             m.closeMenu(out);
-            m.run(item.action, now, paused, out);
+            m.run(item.action, paused, out);
         },
     }
 }
 
-fn run(m: *Modes, a: Action, now: i96, paused: bool, out: *Effects) void {
+fn run(m: *Modes, a: Action, paused: bool, out: *Effects) void {
     log.debug("action: {t}", .{a});
     switch (a) {
         .toggle_pause => out.push(.{ .engine = if (paused) .@"resume" else .pause }),
@@ -425,7 +432,7 @@ fn run(m: *Modes, a: Action, now: i96, paused: bool, out: *Effects) void {
         .slower => out.push(.{ .engine = .slower }),
         .reset_speed => out.push(.{ .engine = .reset_speed }),
         .toggle_stats => out.push(.toggle_stats),
-        .game => m.enterGame(now, out),
+        .game => m.enterGame(out),
         .quit => m.openModal(.quit_prompt, out),
     }
     // Speed and pause show on the status line.
@@ -445,10 +452,32 @@ fn isModeKey(m: *const Modes, e: keys.Event) bool {
     return m.path.hasReleases() and e.key == .named and e.key.named == .escape and !e.mods.chord();
 }
 
-/// Back to game mode, or, with game input disabled, the notice saying why
-/// not. A Ctrl-C prompt that is showing stays: Ctrl-C always takes over.
-fn enterGame(m: *Modes, now: i96, out: *Effects) void {
+/// Back to game mode, or, with game input disabled, a recheck of the
+/// protocol (`recheckDone` then enters game mode or shows the notice).
+fn enterGame(m: *Modes, out: *Effects) void {
     if (m.path != .disabled) return m.setMode(.game, out);
+    if (m.rechecking) return;
+    log.info("game mode asked for: asking the terminal for the kitty keyboard protocol again", .{});
+    m.rechecking = true;
+    out.push(.recheck_keyboard);
+}
+
+/// The answer to `recheck_keyboard`: with the protocol `active`, game input
+/// is enabled (the kitty path) and game mode entered, unless a modal box
+/// has opened meanwhile; otherwise the notice says why not.
+pub fn recheckDone(m: *Modes, active: bool, now: i96, out: *Effects) void {
+    if (!m.rechecking) return;
+    m.rechecking = false;
+    if (!active) return m.refuseGame(now, out);
+    log.info("the kitty keyboard protocol is active: game input enabled", .{});
+    m.path = .kitty;
+    out.push(.layers_changed);
+    if (m.modal == .none) m.setMode(.game, out);
+}
+
+/// The game-input-disabled notice. A Ctrl-C prompt that is showing stays:
+/// Ctrl-C always takes over.
+fn refuseGame(m: *Modes, now: i96, out: *Effects) void {
     if (m.transient) |t| if (t.kind == .ctrl_c) return;
     log.debug("game mode refused: game input disabled", .{});
     m.transient = .{ .kind = .game_disabled, .until = now + notice_ns };
@@ -534,18 +563,24 @@ const Harness = struct {
     out: Effects = .{},
     paused: bool = false,
     t: i96 = 0,
+    /// The terminal's answer to `recheck_keyboard`, given at once; null
+    /// leaves the recheck out, for the test to answer.
+    recheck: ?bool = false,
 
     fn init(config: Config) Harness {
         return .{ .m = .init(config) };
     }
 
     fn apply(h: *Harness) void {
-        for (h.out.slice()) |e| switch (e) {
+        var i: usize = 0;
+        // By index: an answered recheck adds effects.
+        while (i < h.out.len) : (i += 1) switch (h.out.buf[i]) {
             .engine => |c| switch (c) {
                 .pause => h.paused = true,
                 .@"resume" => h.paused = false,
                 else => {},
             },
+            .recheck_keyboard => if (h.recheck) |active| h.m.recheckDone(active, h.t, &h.out),
             else => {},
         };
     }
@@ -929,6 +964,56 @@ test "disabled: the menu has no i; Ctrl-C replaces the notice, and the notice do
     h = .init(.{ .path = .disabled });
     _ = h.key(press('i'), 0);
     try testing.expect(!hasQuit(h.key(ctrl('c'), 10)));
+}
+
+test "disabled: a recheck that finds the protocol enables game input and enters game mode" {
+    const lv = quietLogs();
+    defer testing.log_level = lv;
+    var h: Harness = .init(.{ .path = .disabled });
+    h.recheck = null;
+    try testing.expect(has(h.key(press('i'), 0), .recheck_keyboard));
+    // Nothing shows while it is out, and asking again asks nothing more.
+    try testing.expect(h.m.view().box == null);
+    try testing.expect(!has(h.key(named(.enter), 1), .recheck_keyboard));
+    h.out.clear();
+    h.m.recheckDone(true, 5 * ms, &h.out);
+    var v = h.m.view();
+    try testing.expectEqual(Mode.game, v.mode);
+    try testing.expectEqual(Flag.none, v.flag);
+    try testing.expect(v.box == null);
+    _ = h.key(press('e'), 10);
+    try testing.expect(h.down(.up));
+    _ = h.key(kind('e', .release), 20);
+    try testing.expect(!h.anyDown());
+    // Esc is the mode key now.
+    _ = h.key(named(.escape), 30);
+    try testing.expectEqual(Mode.tui, h.m.view().mode);
+
+    // Lost again later: disabled again, and `i` rechecks once more.
+    h.out.clear();
+    h.m.switchToDisabled(h.paused, &h.out);
+    h.apply();
+    v = h.m.view();
+    try testing.expectEqual(Flag.game_disabled, v.flag);
+    _ = h.key(press('x'), 40); // dismisses the box
+    try testing.expect(has(h.key(press('i'), 50), .recheck_keyboard));
+}
+
+test "disabled: a recheck answered with a modal box open enables game input but stays in TUI mode" {
+    const lv = quietLogs();
+    defer testing.log_level = lv;
+    var h: Harness = .init(.{ .path = .disabled });
+    h.recheck = null;
+    _ = h.key(press('i'), 0);
+    _ = h.key(press(' '), 1);
+    _ = h.key(press('q'), 2);
+    try testing.expect(h.m.view().box.?.modal);
+    h.out.clear();
+    h.m.recheckDone(true, 3 * ms, &h.out);
+    const v = h.m.view();
+    try testing.expectEqual(Mode.tui, v.mode);
+    try testing.expectEqual(Flag.none, v.flag);
+    try testing.expect(v.box.?.modal);
 }
 
 test "legacy: the fixed hold through Modes" {
