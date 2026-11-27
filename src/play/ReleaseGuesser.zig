@@ -7,6 +7,11 @@
 //! the *release timeout* (a few repeat intervals). Both are learned from
 //! the last few observations, clamped, and start fresh each run.
 //!
+//! A delay longer than the initial window looks like a tap, then a new press
+//! followed quickly by repeats. When that happens, the gap from the tap is
+//! the delay, so it is learned from instead of the first repeat's gap; the
+//! first long hold stutters once, and later ones don't (up to the max).
+//!
 //! Terminals repeat only the most recent key, so pressing a second key
 //! doesn't release the first directly: its repeats stop and its hold runs
 //! out on its own.
@@ -38,7 +43,12 @@ const Held = struct {
     pressed_ns: i96,
     last_ns: i96,
     repeated: bool,
+    /// The gap from an earlier tap of the same key that ran out just
+    /// before this press: the delay, if a quick repeat follows.
+    after_tap_ns: ?i96 = null,
 };
+
+const Tap = struct { key: keys.Key, pressed_ns: i96 };
 
 held: [capacity]Held = undefined,
 len: usize = 0,
@@ -46,6 +56,8 @@ initial_ns: i96 = default_initial_ns,
 release_ns: i96 = default_release_ns,
 first_gaps: Samples = .{},
 intervals: Samples = .{},
+/// The last hold that ran out without repeating.
+last_tap: ?Tap = null,
 
 pub const Press = struct {
     kind: enum { new, repeat },
@@ -59,17 +71,30 @@ pub const Press = struct {
 pub fn press(g: *ReleaseGuesser, key: keys.Key, now: i96) Press {
     for (g.held[0..g.len]) |*h| {
         if (!h.key.eql(key)) continue;
+        const gap = now - h.last_ns;
         if (h.repeated) {
-            g.intervals.push(now - h.last_ns);
+            g.intervals.push(gap);
             g.learnRelease();
+        } else if (h.after_tap_ns != null and isRepeatGap(gap, h.after_tap_ns.?)) {
+            // The tap was the start of this hold: its gap is the delay.
+            g.first_gaps.push(h.after_tap_ns.?);
+            g.learnInitial();
+            g.intervals.push(gap);
+            g.learnRelease();
+            h.repeated = true;
         } else {
-            g.first_gaps.push(now - h.pressed_ns);
+            g.first_gaps.push(gap);
             g.learnInitial();
             h.repeated = true;
         }
         h.last_ns = now;
         return .{ .kind = .repeat };
     }
+    var after_tap: ?i96 = null;
+    if (g.last_tap) |t| {
+        if (t.key.eql(key) and now - t.pressed_ns <= initial_max_ns) after_tap = now - t.pressed_ns;
+    }
+    g.last_tap = null;
     var result: Press = .{ .kind = .new };
     if (g.len == capacity) {
         var oldest: usize = 0;
@@ -79,7 +104,7 @@ pub fn press(g: *ReleaseGuesser, key: keys.Key, now: i96) Press {
         result.evicted = g.held[oldest].key;
         g.removeAt(oldest);
     }
-    g.held[g.len] = .{ .key = key, .pressed_ns = now, .last_ns = now, .repeated = false };
+    g.held[g.len] = .{ .key = key, .pressed_ns = now, .last_ns = now, .repeated = false, .after_tap_ns = after_tap };
     g.len += 1;
     return result;
 }
@@ -101,7 +126,9 @@ pub fn expire(g: *ReleaseGuesser, now: i96, out: *[capacity]keys.Key) []keys.Key
     var i: usize = 0;
     while (i < g.len) {
         if (g.deadlineOf(g.held[i]) <= now) {
-            out[n] = g.held[i].key;
+            const h = g.held[i];
+            g.last_tap = if (h.repeated) null else .{ .key = h.key, .pressed_ns = h.pressed_ns };
+            out[n] = h.key;
             n += 1;
             g.removeAt(i);
         } else i += 1;
@@ -112,11 +139,20 @@ pub fn expire(g: *ReleaseGuesser, now: i96, out: *[capacity]keys.Key) []keys.Key
 /// Forgets every hold, e.g. on a mode switch. Learned timings are kept.
 pub fn releaseAll(g: *ReleaseGuesser) void {
     g.len = 0;
+    g.last_tap = null;
 }
 
 pub fn isHeld(g: *const ReleaseGuesser, key: keys.Key) bool {
     for (g.held[0..g.len]) |h| if (h.key.eql(key)) return true;
     return false;
+}
+
+/// Whether a first repeat `gap` after a press that followed a tap by
+/// `after_tap` is a repeat interval rather than a delay: shorter than any
+/// delay we learn, and well under the gap from the tap. A quick re-tap then
+/// a short-delay hold also fits, but the window only grows from it.
+fn isRepeatGap(gap: i96, after_tap: i96) bool {
+    return gap < initial_min_ns and gap * 2 <= after_tap;
 }
 
 fn deadlineOf(g: *const ReleaseGuesser, h: Held) i96 {
@@ -265,6 +301,55 @@ test "the initial window clamps at the max" {
         try expectExpire(&g, t, &.{e_key});
     }
     try testing.expectEqual(initial_max_ns, g.initial_ns);
+}
+
+test "a delay longer than the window is learned from the tap before it" {
+    var g: ReleaseGuesser = .{};
+    // X11's default: 660 ms delay, 25 repeats/s (40 ms).
+    _ = try pressAt(&g, e_key, 0);
+    try expectExpire(&g, 500, &.{e_key});
+    try testing.expectEqual(.new, try pressAt(&g, e_key, 660));
+    try testing.expectEqual(.repeat, try pressAt(&g, e_key, 700));
+    // Learned: initial 1.2 × 660 = 792, release 2.5 × 40 = 100 ms.
+    try testing.expectEqual(@as(i96, 792 * ms), g.initial_ns);
+    try testing.expectEqual(@as(i96, 100 * ms), g.release_ns);
+    try expectExpire(&g, 800, &.{e_key});
+
+    // The next hold is continuous through the delay, and the window stays.
+    try testing.expectEqual(.new, try pressAt(&g, e_key, 2000));
+    var t: i96 = 2660;
+    while (t < 4000) : (t += 40) {
+        try testing.expectEqual(.repeat, try pressAt(&g, e_key, t));
+    }
+    try testing.expectEqual(@as(i96, 792 * ms), g.initial_ns);
+}
+
+test "a re-tap, then a hold, learns the hold's own delay" {
+    var g: ReleaseGuesser = .{};
+    _ = try pressAt(&g, e_key, 0);
+    try expectExpire(&g, 500, &.{e_key});
+    // Tapped again at 600 and held: the first repeat comes 300 ms later,
+    // too slow for a repeat interval, so it is the delay.
+    _ = try pressAt(&g, e_key, 600);
+    try testing.expectEqual(.repeat, try pressAt(&g, e_key, 900));
+    try testing.expectEqual(@as(i96, 360 * ms), g.initial_ns);
+}
+
+test "a tap of another key, or too long ago, isn't linked to the next press" {
+    var g: ReleaseGuesser = .{};
+    _ = try pressAt(&g, f_key, 0);
+    try expectExpire(&g, 500, &.{f_key});
+    _ = try pressAt(&g, e_key, 660);
+    _ = try pressAt(&g, e_key, 700);
+    // The 40 ms gap is learned as the delay, as before: clamped to 250.
+    try testing.expectEqual(initial_min_ns, g.initial_ns);
+
+    g = .{};
+    _ = try pressAt(&g, e_key, 0);
+    try expectExpire(&g, 500, &.{e_key});
+    _ = try pressAt(&g, e_key, 900);
+    _ = try pressAt(&g, e_key, 940);
+    try testing.expectEqual(initial_min_ns, g.initial_ns);
 }
 
 test "two keys one after the other each run out on their own" {

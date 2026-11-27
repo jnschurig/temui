@@ -113,17 +113,34 @@ pub const menu_items = [_]MenuItem{
 
 pub const quit_prompt_text = [_][]const u8{"Quit? Enter to confirm, any other key cancels"};
 pub const ctrl_c_text = [_][]const u8{"Press Ctrl-C again to quit"};
-pub const legacy_warning_text = [_][]const u8{
-    "Legacy keyboard input",
-    "",
-    "Held keys are guessed from auto-repeat:",
-    "a tap holds its button for up to 0.5 s,",
-    "and only one key can be held at a time.",
-    "The kitty keyboard protocol (or Windows)",
-    "reports real releases.",
-    "",
-    "Press any key to continue.",
-};
+/// The legacy warning. It names the mode key, because Esc can't leave game
+/// mode on this path and the chord is the only way out.
+pub fn legacyWarningText(mode_key: u21) []const []const u8 {
+    return switch (mode_key) {
+        inline 'a'...'z', ']', '\\', '^' => |k| legacyWarning(std.fmt.comptimePrint("Ctrl-{c}", .{std.ascii.toUpper(@as(u8, k))})),
+        else => legacyWarning("The mode key"),
+    };
+}
+
+/// A container-level constant per chord, so the lines outlive the call: the
+/// viewer keeps them across frames.
+fn legacyWarning(comptime chord: []const u8) []const []const u8 {
+    return &struct {
+        const lines = [_][]const u8{
+            "Legacy keyboard input",
+            "",
+            "Held keys are guessed from auto-repeat:",
+            "a tap holds its button for up to 0.5 s,",
+            "and only one key can be held at a time.",
+            "The kitty keyboard protocol (or Windows)",
+            "reports real releases.",
+            "",
+            chord ++ " leaves game mode (Esc doesn't).",
+            "",
+            "Press any key to continue.",
+        };
+    }.lines;
+}
 
 pub const Box = struct {
     lines: []const []const u8,
@@ -226,7 +243,7 @@ pub fn nextDeadline(m: *const Modes) ?i96 {
 pub fn view(m: *const Modes) View {
     const box: ?Box = switch (m.modal) {
         .quit_prompt => .{ .lines = &quit_prompt_text, .modal = true },
-        .legacy_warning => .{ .lines = &legacy_warning_text, .modal = true },
+        .legacy_warning => .{ .lines = legacyWarningText(m.config.mode_key), .modal = true },
         .none => if (m.ctrl_c_until != null) .{ .lines = &ctrl_c_text, .modal = false } else null,
     };
     return .{
@@ -823,7 +840,10 @@ test "legacy warning: holds the engine, any key dismisses it and is consumed" {
     const v = h.m.view();
     try testing.expect(v.legacy);
     try testing.expect(v.box.?.modal);
-    try testing.expectEqualStrings(legacy_warning_text[0], v.box.?.lines[0]);
+    try testing.expectEqualStrings("Legacy keyboard input", v.box.?.lines[0]);
+    try testing.expectEqualStrings("Ctrl-] leaves game mode (Esc doesn't).", v.box.?.lines[8]);
+    // The view returns the same lines each frame, so the viewer doesn't redraw.
+    try testing.expectEqual(v.box.?.lines.ptr, h.m.view().box.?.lines.ptr);
     // The dismissing key is bound (e), but never reaches the game.
     const fx = h.key(press('e'), 10);
     try testing.expect(has(fx, .{ .engine = .@"resume" }));
@@ -832,6 +852,11 @@ test "legacy warning: holds the engine, any key dismisses it and is consumed" {
     try testing.expect(h.m.view().box == null);
     _ = h.key(press('e'), 20);
     try testing.expect(h.down(.up));
+}
+
+test "legacy warning names the --mode-key chord" {
+    try testing.expectEqualStrings("Ctrl-G leaves game mode (Esc doesn't).", legacyWarningText('g')[8]);
+    try testing.expectEqualStrings("Ctrl-\\ leaves game mode (Esc doesn't).", legacyWarningText('\\')[8]);
 }
 
 test "legacy warning with --paused: dismissing it doesn't resume" {

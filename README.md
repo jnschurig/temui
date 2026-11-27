@@ -18,14 +18,14 @@ Everything else happens in the terminal:
 - **Video:** each frame is drawn with the best method the terminal supports: kitty graphics, Unicode half-blocks, or ASCII. The method is chosen automatically and can be overridden.
 - **Input:** the keyboard (via the kitty keyboard protocol where available, or the Windows console) and gamepads.
 - **Audio:** audio plays through the system's sound output, with no extra libraries to install.
-- **Modes:** in game mode, every key goes to the game. A leader key switches to TUI mode, which uses vim-style keys. Running `temui` with no arguments opens a searchable ROM browser.
+- **Modes:** in game mode, every key goes to the game. A mode key switches to TUI mode, which uses vim-style keys and a Space-leader menu. Running `temui` with no arguments opens a searchable ROM browser.
 - **Instances:** each game runs as its own process, either in your terminal or headless in the background, and you can attach to it later. There is no daemon. Scripts and AI agents can drive any instance through a versioned JSON protocol over a local socket.
 
 It ships as one binary for Linux, macOS and Windows on x86_64 and aarch64, with nothing else to install.
 
 ## Status
 
-Pre-alpha: temui can play a game in the terminal with a core you supply (see [Playing a game](#playing-a-game)). There is no game input, audio or saving yet, and cores aren't downloaded for you. It can also run a core headless and dump frames to image files (see [Running a core headless](#running-a-core-headless)).
+Pre-alpha: temui can play a game in the terminal with the keyboard, using a core you supply (see [Playing a game](#playing-a-game)). There is no audio or saving yet, and cores aren't downloaded for you. It can also run a core headless and dump frames to image files (see [Running a core headless](#running-a-core-headless)).
 
 - [Architecture decisions](docs/decisions.md): what was chosen and why (D1–D15).
 - [Roadmap](docs/roadmap.md): ordered work items, each with a seed prompt in [`docs/roadmap/`](docs/roadmap/).
@@ -59,25 +59,52 @@ temui play testdata/testcore.rom --core zig-out/lib/temui_test_libretro.dylib --
 | `--core <path>` | The libretro core to load (required) |
 | `--speed <x>` | Starting speed: a multiple such as `0.25` or `4`, or `max` for unthrottled (default 1) |
 | `--present-fps <f>` | Draw at most `<f>` frames per second (default: the core's fps) |
-| `--overlay` | Start with the stats overlay shown: emulated and presented fps, speed, bytes/s and encode and write time per second |
+| `--overlay` | Start with the detailed stats in the status line: presented fps, bytes/s, encode and write time per second, and lag |
 | `--paused` | Start paused, showing the first frame |
 | `--duration <s>` | Quit after `<s>` seconds |
 | `--renderer <name>` | `kitty`, `halfblock`, `ascii` or `auto` (default) |
+| `--keyboard <path>` | `auto` (default: the kitty keyboard protocol if the terminal reports it, else legacy), `kitty` (push the protocol even if detection didn't see it) or `legacy`. Ignored on Windows, which always uses console input |
+| `--mode-key <chord>` | The chord that leaves game mode (default `ctrl-]`): `ctrl-a`…`ctrl-z`, `ctrl-]`, `ctrl-\` or `ctrl-^`, except `ctrl-c`, `ctrl-h`, `ctrl-i`, `ctrl-j` and `ctrl-m` |
 | `--option`, `--system-dir`, `--save-dir` | As for `run` |
 
-The keys are temporary, until game input and modes arrive (roadmap 06); no key reaches the game yet.
+The bottom row is a status line: the mode (`GAME` or `TUI`, plus `LEGACY` on the legacy input path), the ROM and core (or the detailed stats, toggled with `o`), and the emulated fps and speed.
+
+### Keys
+
+temui is modal, like vim. `play` starts in **game mode** (vim's insert mode), where keys go to the game. The **mode key** switches to **TUI mode** (normal mode), where the game keeps running and keys control temui. The mode key is Esc where the terminal reports key releases (the kitty keyboard protocol, the Windows console), and Ctrl-] everywhere. Esc only ever backs out one layer, so pressing it again is always safe.
+
+Game mode, one RetroPad for SNES, NES and Game Boy alike (remapping arrives in roadmap 11):
+
+| Key | RetroPad |
+| --- | --- |
+| `e` `s` `d` `f` | Up, Left, Down, Right |
+| `l` `k` `i` `j` | A, B, X, Y (a SNES diamond: X top, Y left, B bottom, A right) |
+| `a` `;` | L, R |
+| `h` | Start |
+| `g` | Select |
+
+Keys are matched by the character they type, with Shift ignored, and never with Ctrl, Alt or Super held. On a non-US layout, Ctrl-] may be awkward to type or not reach the terminal at all: pick another chord with `--mode-key`.
+
+TUI mode:
 
 | Key | |
 | --- | --- |
-| `q`, Ctrl-C | Quit |
 | `p` | Pause / resume |
 | `.` | Step one frame (while paused) |
 | `+` or `=`, `-`, `0` | Faster, slower, normal speed (0.25×, 0.5×, 1×, 2×, 4×, 8×, max) |
-| `o` | Show / hide the overlay |
+| `o` | Show / hide the detailed stats |
+| `i`, Enter, the mode-key chord | Back to the game |
+| Space | The leader menu: lists these keys and `q` quit; Space or Esc closes it |
+
+Quitting always asks first, because nothing is saved yet: Space `q` then Enter, or Ctrl-C twice within 3 s from anywhere (the first shows a prompt; the game keeps running meanwhile). If temui stops responding (a core stuck in a loop, or a terminal that stopped reading), two Ctrl-Cs quit at once with exit code 130.
+
+**Without the kitty keyboard protocol** (tmux, Terminal.app, or `--keyboard legacy`), the terminal reports key presses but not releases, so temui guesses them from auto-repeat, and says so in a box at start. A tap holds its button for about your key repeat delay (half a second until it is learned, at most 0.8 s), and only one key can be held at a time, because a terminal repeats only the last key pressed. Esc isn't the mode key on this path; use Ctrl-]. If the protocol was expected but keys arrive in legacy form anyway, temui switches to guessing for the rest of the run.
+
+Holding keys and releasing them was verified in Ghostty and Rex ([results](docs/bench/06-keyboard.md)); kitty and WezTerm are covered by recorded-sequence tests only.
 
 On exit temui prints one summary line (`N frames in S s: emu X fps, presented Y fps`). Resizing the terminal refits the picture. Anything a core prints to stdout or stderr goes to the log (as `core: stdio: …`), never to the screen; snes9x, for example, prints `Map_HiROMMap` while loading a HiROM game. Pacing and decoupling were measured in Ghostty and Rex: see [the verification results](docs/bench/05-play-loop.md).
 
-**Windows:** `play` is built and tested in CI only, not run in a real console. Pacing uses a high-resolution waitable timer and resizes come from console window events. Output that a core writes to stdout or stderr is **not** contained on Windows yet and can corrupt the display.
+**Windows:** `play` is built and tested in CI only, not run in a real console. Pacing uses a high-resolution waitable timer, resizes come from console window events, and keys are read as console key events with real releases. Output that a core writes to stdout or stderr is **not** contained on Windows yet and can corrupt the display.
 
 ## Running a core headless
 

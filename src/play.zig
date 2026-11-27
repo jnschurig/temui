@@ -277,6 +277,9 @@ pub fn run(
                 if (applyEffects(&fx, &engine, &viewer, t)) break :loop;
             }
         } else {
+            // Raw bytes, for recording terminals' key sequences as test
+            // fixtures (`--verbose`).
+            if (wake.input.len > 0) log.debug("input: \"{f}\"", .{std.ascii.hexEscape(wake.input, .lower)});
             var it = decoder.feed(wake.input, t);
             while (it.next()) |in| {
                 modes.handle(in, t, engine.paused(), &fx);

@@ -424,16 +424,21 @@ pub fn usage(w: *std.Io.Writer, log_dir: []const u8) std.Io.Writer.Error!void {
         \\      --overlay           Start with the detailed stats in the status line
         \\      --keyboard <path>   auto (default), kitty or legacy; ignored on Windows
         \\      --mode-key <chord>  The chord that leaves game mode (default ctrl-]);
-        \\                          ctrl-a to ctrl-z, ctrl-], ctrl-\\ or ctrl-^
+        \\                          ctrl-a to ctrl-z, ctrl-], ctrl-\ or ctrl-^
         \\      --paused            Start paused, showing the first frame
         \\      --duration <s>      Quit after <s> seconds
         \\      --option, --system-dir, --save-dir   As for 'run'
         \\
-        \\Play keys (temporary, until modes arrive):
-        \\  q, Ctrl-C   Quit                 p   Pause / resume
-        \\  .           Step one frame       o   Show / hide the overlay
-        \\  + or =      Faster               -   Slower
-        \\  0           Normal speed
+        \\Play keys: game mode sends keys to the game; the mode key (Esc where the
+        \\terminal reports releases, and Ctrl-] everywhere) switches to TUI mode.
+        \\  Game:  e s d f  Up Left Down Right   l k i j  A B X Y   a ;  L R
+        \\         h  Start   g  Select
+        \\  TUI:   p  Pause / resume       .  Step one frame    o  Detailed stats
+        \\         + or =  Faster          -  Slower            0  Normal speed
+        \\         i, Enter  Back to game  Space  Menu (q: quit)   Esc  Back out
+        \\  Quit:  Space q Enter, or Ctrl-C twice. Stuck: Ctrl-C twice quits (exit 130).
+        \\Without the kitty keyboard protocol (or --keyboard legacy), releases are
+        \\guessed from auto-repeat: taps last up to 0.5 s, one key held at a time.
         \\
         \\Detect options (show what temui would use in this terminal):
         \\      --json              Print the result as JSON
@@ -824,7 +829,7 @@ test "usage documents play" {
     var buf: [8192]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     try usage(&w, "/logs");
-    for ([_][]const u8{ "temui play <rom> --core <path>", "--speed <x>", "--present-fps <f>", "--overlay", "--paused", "--duration <s>", "--keyboard <path>", "--mode-key <chord>" }) |want| {
+    for ([_][]const u8{ "temui play <rom> --core <path>", "--speed <x>", "--present-fps <f>", "--overlay", "--paused", "--duration <s>", "--keyboard <path>", "--mode-key <chord>", "Play keys:", "Ctrl-C twice" }) |want| {
         if (std.mem.indexOf(u8, w.buffered(), want) == null) {
             std.debug.print("usage lacks '{s}'\n", .{want});
             return error.TestUnexpectedResult;
