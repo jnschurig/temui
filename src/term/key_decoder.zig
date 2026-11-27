@@ -19,7 +19,14 @@
 //! for `stale_ns` is Esc (`deadline` / `expire`).
 //!
 //! Both modes: `CSI I` / `CSI O` are focus reports. Unknown sequences are
-//! dropped. A 0x03 byte always resets the parser and is Ctrl-C.
+//! dropped. A 0x03 byte always resets the parser and is Ctrl-C, except in
+//! a paste.
+//!
+//! **Bracketed paste** (both modes): everything from `CSI 200 ~` to
+//! `CSI 201 ~` is discarded, so pasted text never reads as keys (or as
+//! legacy keys on the kitty path). If no byte arrives for `paste_idle_ns`
+//! before the end marker, the paste is ended there (`deadline` /
+//! `expire`), so a lost end marker can't lock out input.
 
 const std = @import("std");
 const keys = @import("keys.zig");
@@ -37,6 +44,21 @@ pub const Mode = enum { kitty, legacy };
 /// ESC (as vim's `ttimeoutlen`, 100 ms).
 pub const stale_ns: i96 = 100 * std.time.ns_per_ms;
 
+/// How long a paste may go without a byte before it is taken as ended.
+/// Terminals send a paste in a burst.
+pub const paste_idle_ns: i96 = 500 * std.time.ns_per_ms;
+
+const paste_end = "\x1b[201~";
+
+const log = std.log.scoped(.input);
+
+const Paste = struct {
+    /// Bytes discarded so far, the end marker included.
+    bytes: usize = 0,
+    /// How much of `paste_end` the last bytes matched.
+    matched: u8 = 0,
+};
+
 pub const Decoder = struct {
     mode: Mode,
     parser: replies.Parser = .{},
@@ -52,6 +74,8 @@ pub const Decoder = struct {
     utf8_alt: bool = false,
     /// One input queued ahead of the bytes (a stale ESC found by `feed`).
     queued: ?Input = null,
+    /// Inside a bracketed paste.
+    paste: ?Paste = null,
 
     pub fn init(mode: Mode) Decoder {
         return .{ .mode = mode, .acked = mode == .legacy };
@@ -76,7 +100,9 @@ pub const Decoder = struct {
     /// sequence is dropped.
     pub fn feed(d: *Decoder, bytes: []const u8, now_ns: i96) Iterator {
         if (bytes.len > 0) {
-            if (d.last_ns) |last| if (now_ns - last >= stale_ns) {
+            if (d.paste != null) {
+                _ = d.expire(now_ns);
+            } else if (d.last_ns) |last| if (now_ns - last >= stale_ns) {
                 d.queued = d.takeStale();
             };
             d.last_ns = now_ns;
@@ -84,17 +110,42 @@ pub const Decoder = struct {
         return .{ .d = d, .rest = bytes };
     }
 
-    /// When a held lone ESC goes stale (call `expire` then), or null.
+    /// When a held lone ESC goes stale, or a paste is taken as ended (call
+    /// `expire` then), or null.
     pub fn deadline(d: *const Decoder) ?i96 {
+        const last = d.last_ns orelse return null;
+        if (d.paste != null) return last + paste_idle_ns;
         if (!d.parser.pendingLoneEsc()) return null;
-        return (d.last_ns orelse return null) + stale_ns;
+        return last + stale_ns;
     }
 
-    /// Esc, if a lone ESC has been held for `stale_ns` by `now_ns`.
+    /// Esc, if a lone ESC has been held for `stale_ns` by `now_ns`. Ends a
+    /// paste that has gone `paste_idle_ns` without a byte.
     pub fn expire(d: *Decoder, now_ns: i96) ?Input {
         const dl = d.deadline() orelse return null;
         if (now_ns < dl) return null;
+        if (d.paste) |p| {
+            log.warn("paste: no end marker after {d} bytes; taking it as ended", .{p.bytes});
+            d.paste = null;
+            return null;
+        }
         return d.takeStale();
+    }
+
+    /// A paste byte: discarded, watching for the end marker.
+    fn pasteByte(d: *Decoder, b: u8) void {
+        const p = &d.paste.?;
+        p.bytes += 1;
+        if (b == paste_end[p.matched]) {
+            p.matched += 1;
+            if (p.matched == paste_end.len) {
+                log.debug("paste: {d} bytes discarded", .{p.bytes - paste_end.len});
+                d.paste = null;
+            }
+        } else {
+            // ESC occurs only at the marker's start.
+            p.matched = if (b == paste_end[0]) 1 else 0;
+        }
     }
 
     fn takeStale(d: *Decoder) ?Input {
@@ -125,6 +176,10 @@ pub const Decoder = struct {
             while (it.rest.len > 0) {
                 const b = it.rest[0];
                 it.rest = it.rest[1..];
+                if (d.paste != null) {
+                    d.pasteByte(b);
+                    continue;
+                }
                 if (b == 0x03) {
                     d.parser = .{};
                     d.utf8_need = 0;
@@ -219,6 +274,12 @@ pub const Decoder = struct {
             '~' => {
                 const num = parseNum(sub(fields[0], 0)) orelse return null;
                 if (num == 27) return modifyOtherKeys(fields);
+                if (std.mem.eql(u8, params, "200")) {
+                    d.paste = .{};
+                    return null;
+                }
+                // A stray end marker.
+                if (num == 200 or num == 201) return null;
                 const n = tildeKey(num) orelse return null;
                 return withEventMods(.named(n), fields[1]);
             },
@@ -539,7 +600,7 @@ test "kitty: named and functional keys" {
 }
 
 test "kitty: text field and unknown sequences are tolerated" {
-    try expectDecode(.kitty, "\x1b[97;1;97u\x1b[?1049h\x1b[12;40R\x1b[200~\x1b[5;5x", &.{
+    try expectDecode(.kitty, "\x1b[97;1;97u\x1b[?1049h\x1b[12;40R\x1b[201~\x1b[5;5x", &.{
         key(ch('a'), none, .press),
     });
 }
@@ -696,4 +757,59 @@ test "kitty: a stale lone ESC counts as legacy" {
     _ = feedAll(&d, "\x1b", 0, &buf);
     try expectInputsEql(&.{key(nm(.escape), none, .press)}, &.{d.expire(stale_ns).?});
     try testing.expect(d.sawLegacyKey());
+}
+
+test "paste: discarded in both modes, split at any boundary; a key after it is decoded" {
+    // Letters, Ctrl bytes (Ctrl-C and Ctrl-] included), ESC sequences and a
+    // partial end marker inside the paste.
+    const paste = "\x1b[200~hello q\r\x03\x1d\x1b[A\x1b[201\x1b[20x\x1b[112u" ++ paste_end;
+    try expectDecode(.kitty, "\x1b[101u" ++ paste ++ "\x1b[113u", &.{
+        key(ch('e'), none, .press),
+        key(ch('q'), none, .press),
+    });
+    try expectDecode(.legacy, "e" ++ paste ++ "q", &.{
+        key(ch('e'), none, .press),
+        key(ch('q'), none, .press),
+    });
+    // Pasted plain bytes never count as legacy keys on the kitty path.
+    var d: Decoder = .init(.kitty);
+    d.acked = true;
+    var buf: [8]Input = undefined;
+    try testing.expectEqual(0, (try collect(&d, paste, 1, &buf)).len);
+    try testing.expect(!d.sawLegacyKey());
+    try testing.expectEqual(@as(?Paste, null), d.paste);
+}
+
+test "paste: a start marker with no end is ended after 500 ms without a byte" {
+    // The warning is expected.
+    const lv = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = lv;
+    const ms = std.time.ns_per_ms;
+    var d: Decoder = .init(.kitty);
+    d.acked = true;
+    var it = d.feed("\x1b[200~abc", 0);
+    try testing.expectEqual(null, it.next());
+    try testing.expectEqual(@as(?i96, 500 * ms), d.deadline());
+    // Bytes less than 500 ms apart keep it going, Ctrl-C included.
+    for (1..5) |i| {
+        it = d.feed("x\x03", @as(i96, @intCast(i)) * 400 * ms);
+        try testing.expectEqual(null, it.next());
+    }
+    try testing.expectEqual(@as(?i96, 2100 * ms), d.deadline());
+    try testing.expectEqual(null, d.expire(2099 * ms));
+    try testing.expect(d.paste != null);
+    try testing.expectEqual(null, d.expire(2100 * ms));
+    try testing.expectEqual(@as(?Paste, null), d.paste);
+    try testing.expectEqual(@as(?i96, null), d.deadline());
+    it = d.feed("\x1b[113u", 2200 * ms);
+    try testing.expectEqual(key(ch('q'), none, .press), it.next().?);
+
+    // Without `expire`, a byte arriving after the gap ends the paste and is
+    // decoded itself.
+    d = .init(.legacy);
+    it = d.feed("\x1b[200~abc", 0);
+    try testing.expectEqual(null, it.next());
+    it = d.feed("q", 600 * ms);
+    try testing.expectEqual(key(ch('q'), none, .press), it.next().?);
 }

@@ -43,6 +43,10 @@ pub const string_terminator = "\x1b\\";
 /// Focus reporting (`CSI I` / `CSI O`) on and off.
 pub const focus_on = "\x1b[?1004h";
 pub const focus_off = "\x1b[?1004l";
+/// Bracketed paste on and off: a paste arrives between `CSI 200 ~` and
+/// `CSI 201 ~`, so it can be told from typed keys.
+pub const paste_on = "\x1b[?2004h";
+pub const paste_off = "\x1b[?2004l";
 /// Pops the kitty keyboard flags pushed at `enter`.
 pub const kitty_pop = "\x1b[<u";
 /// Asks for the current kitty keyboard flags, then sends DA1 as a sentinel:
@@ -62,6 +66,8 @@ pub const Options = struct {
     kitty_keyboard_flags: ?u8 = null,
     /// Turn on focus reporting; off again on restore. POSIX terminals.
     focus_events: bool = false,
+    /// Turn on bracketed paste; off again on restore. POSIX terminals.
+    bracketed_paste: bool = false,
     /// Windows: deliver console input as VT sequences
     /// (`ENABLE_VIRTUAL_TERMINAL_INPUT`). Off, `ReadConsoleInputW` returns
     /// `KEY_EVENT` records with virtual-key codes, key-down and key-up.
@@ -78,9 +84,10 @@ pub const Strings = struct {
 pub const max_string_len = 128;
 
 /// Builds the enter and cleanup strings for `opts` into the buffers.
-/// Enter: alternate screen, kitty push, focus on, kitty query. Cleanup, in
-/// reverse: focus off, kitty pop, alternate screen left, after a leading
-/// `string_terminator` (none when there is nothing to clean up).
+/// Enter: alternate screen, kitty push, focus on, paste on, kitty query.
+/// Cleanup, in reverse: paste off, focus off, kitty pop, alternate screen
+/// left, after a leading `string_terminator` (none when there is nothing
+/// to clean up).
 pub fn buildStrings(opts: Options, enter_out: *[max_string_len]u8, cleanup_out: *[max_string_len]u8) Strings {
     var e: std.Io.Writer = .fixed(enter_out);
     var x: std.Io.Writer = .fixed(cleanup_out);
@@ -88,10 +95,12 @@ pub fn buildStrings(opts: Options, enter_out: *[max_string_len]u8, cleanup_out: 
     if (opts.alt_screen) e.writeAll(enter_alt) catch unreachable;
     if (opts.kitty_keyboard_flags) |f| e.print("\x1b[>{d}u", .{f}) catch unreachable;
     if (opts.focus_events) e.writeAll(focus_on) catch unreachable;
+    if (opts.bracketed_paste) e.writeAll(paste_on) catch unreachable;
     if (opts.kitty_keyboard_flags != null) e.writeAll(kitty_query) catch unreachable;
 
-    const any = opts.alt_screen or opts.kitty_keyboard_flags != null or opts.focus_events;
+    const any = opts.alt_screen or opts.kitty_keyboard_flags != null or opts.focus_events or opts.bracketed_paste;
     if (any) x.writeAll(string_terminator) catch unreachable;
+    if (opts.bracketed_paste) x.writeAll(paste_off) catch unreachable;
     if (opts.focus_events) x.writeAll(focus_off) catch unreachable;
     if (opts.kitty_keyboard_flags != null) x.writeAll(kitty_pop) catch unreachable;
     if (opts.alt_screen) x.writeAll(leave_alt) catch unreachable;
@@ -556,6 +565,16 @@ test "enter and cleanup strings for each option combination" {
             .cleanup = string_terminator ++ "\x1b[?1004l\x1b[<u" ++ leave_alt,
         },
         .{
+            .opts = .{ .bracketed_paste = true },
+            .enter = enter_alt ++ "\x1b[?2004h",
+            .cleanup = string_terminator ++ "\x1b[?2004l" ++ leave_alt,
+        },
+        .{
+            .opts = .{ .kitty_keyboard_flags = 15, .focus_events = true, .bracketed_paste = true },
+            .enter = enter_alt ++ "\x1b[>15u\x1b[?1004h\x1b[?2004h\x1b[?u\x1b[c",
+            .cleanup = string_terminator ++ "\x1b[?2004l\x1b[?1004l\x1b[<u" ++ leave_alt,
+        },
+        .{
             .opts = .{ .alt_screen = false, .kitty_keyboard_flags = 1 },
             .enter = "\x1b[>1u\x1b[?u\x1b[c",
             .cleanup = string_terminator ++ "\x1b[<u",
@@ -567,8 +586,8 @@ test "enter and cleanup strings for each option combination" {
         try testing.expectEqualStrings(k.cleanup, got.cleanup);
     }
     // The longest case stays well inside the buffers.
-    const big = buildStrings(.{ .kitty_keyboard_flags = 255, .focus_events = true }, &eb, &cb);
-    try testing.expect(big.enter.len < max_string_len / 2 and big.cleanup.len < max_string_len / 2);
+    const big = buildStrings(.{ .kitty_keyboard_flags = 255, .focus_events = true, .bracketed_paste = true }, &eb, &cb);
+    try testing.expect(big.enter.len < max_string_len * 3 / 4 and big.cleanup.len < max_string_len * 3 / 4);
 }
 
 test "restore writes the cleanup once and is idempotent" {

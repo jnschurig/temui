@@ -138,6 +138,8 @@ pub fn run(
         .contain_stdio = if (log_mod.isActive()) .pipe else .discard,
         .kitty_keyboard_flags = if (path == .kitty) kitty_flags else null,
         .focus_events = true,
+        // A paste is discarded, never read as keys (D9).
+        .bracketed_paste = true,
         .vt_input = false,
     }) catch |err| {
         diag.set("cannot set up the terminal: {t}", .{err});

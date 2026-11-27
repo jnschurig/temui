@@ -222,6 +222,32 @@ test "play: the leader menu's quit, confirmed with Enter, quits normally" {
     if (std.mem.indexOf(u8, r.log_text, "--duration reached") != null) return error.QuitByDuration;
 }
 
+test "play: a bracketed paste is discarded; the keys after it act" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    // The paste holds the whole quit sequence and a pause; if it acted,
+    // play would quit before the script ends (`ScriptNotFinished`).
+    var r = try runPlay(gpa, &.{ "--duration", "15", "--verbose" }, &.{
+        .{ .after_ms = 300, .bytes = "\x1b[200~ q\rp\x03\x03\x1b[201~" },
+        .{ .after_ms = 300, .bytes = " " },
+        .{ .after_ms = 150, .bytes = "q" },
+        .{ .after_ms = 150, .bytes = "\r" },
+    });
+    defer r.deinit(gpa);
+    if (r.exitCode() != 0) {
+        r.dump();
+        return error.TestUnexpectedResult;
+    }
+    const out = r.out.items;
+    const enter = std.mem.indexOf(u8, out, "\x1b[?1049h") orelse return error.NoAltScreenEnter;
+    const leave = std.mem.indexOf(u8, out, "\x1b[?1049l") orelse return error.NoAltScreenLeave;
+    try expectBetween(out, enter, leave, "\x1b[?2004h");
+    try expectBetween(out, enter, leave + 8, "\x1b[?2004l");
+    try expectContains(r.log_text, "debug(input): paste: 6 bytes discarded");
+    try testing.expectEqual(1, std.mem.count(u8, r.log_text, "info(input): menu opened"));
+    if (std.mem.indexOf(u8, r.log_text, "Ctrl-C") != null) return error.PastedCtrlCActed;
+}
+
 test "play: a core stuck in retro_run quits on two Ctrl-Cs via the watchdog" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;

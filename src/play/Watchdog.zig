@@ -154,7 +154,9 @@ fn checkOnce(self: *Watchdog) bool {
     const keep = @min(got.len, self.held.len - self.held_len);
     @memcpy(self.held[self.held_len..][0..keep], got[0..keep]);
     self.held_len += keep;
-    return self.scanner.feed(got) >= 2;
+    // Fed even when nothing was read, so a paste with no end marker times
+    // out here too.
+    return self.scanner.feed(got, self.now()) >= 2;
 }
 
 /// Waits up to a tick for input and reads what is there.
@@ -200,20 +202,23 @@ fn quitNow(_: ?*anyopaque) void {
 /// kitty forms `CSI 99;5u` / `CSI 99;5:1u` (via the kitty decoder, so lock
 /// modifiers and the base-layout key are handled as in the loop); repeats
 /// and releases don't count. Windows: a key-down `KEY_EVENT` for VK `C`
-/// with Ctrl.
+/// with Ctrl. A pasted 0x03 doesn't count (the decoder discards pastes,
+/// and ends one that has gone quiet without its end marker).
 pub const CtrlCScanner = struct {
     decoder: key_decoder.Decoder = .init(.kitty),
     count: usize = 0,
 
-    /// Returns the presses seen so far, including this call's.
-    pub fn feed(s: *CtrlCScanner, raw: []const Raw) usize {
+    /// Returns the presses seen so far, including this call's. `now_ns`
+    /// is the time of the read; `raw` may be empty.
+    pub fn feed(s: *CtrlCScanner, raw: []const Raw, now_ns: i96) usize {
         if (is_windows) {
             for (raw) |r| if (isCtrlCRecord(r)) {
                 s.count += 1;
             };
         } else {
-            // Time doesn't matter here: a lone ESC is never Ctrl-C.
-            var it = s.decoder.feed(raw, 0);
+            // A lone ESC that goes stale is never Ctrl-C: ignored.
+            _ = s.decoder.expire(now_ns);
+            var it = s.decoder.feed(raw, now_ns);
             while (it.next()) |in| switch (in) {
                 .key => |e| if (e.kind == .press and e.isCtrlC()) {
                     s.count += 1;
@@ -257,19 +262,37 @@ test "isStale: never in the wait, not before the threshold" {
 test "CtrlCScanner: legacy and kitty forms, split, mixed, release-only" {
     if (is_windows) return error.SkipZigTest;
     var s: CtrlCScanner = .{};
-    try testing.expectEqual(@as(usize, 0), s.feed("abc"));
-    try testing.expectEqual(@as(usize, 1), s.feed("x\x03y"));
+    try testing.expectEqual(@as(usize, 0), s.feed("abc", 0));
+    try testing.expectEqual(@as(usize, 1), s.feed("x\x03y", 0));
     // Kitty press, split across reads.
-    try testing.expectEqual(@as(usize, 1), s.feed("\x1b[9"));
-    try testing.expectEqual(@as(usize, 2), s.feed("9;5u"));
+    try testing.expectEqual(@as(usize, 1), s.feed("\x1b[9", 0));
+    try testing.expectEqual(@as(usize, 2), s.feed("9;5u", 0));
     // Explicit press event, with Caps Lock on.
-    try testing.expectEqual(@as(usize, 3), s.feed("\x1b[99;69:1u"));
+    try testing.expectEqual(@as(usize, 3), s.feed("\x1b[99;69:1u", 0));
 
     var r: CtrlCScanner = .{};
     // Repeat and release don't count, nor Ctrl-Shift-... other keys.
-    try testing.expectEqual(@as(usize, 0), r.feed("\x1b[99;5:2u\x1b[99;5:3u\x1b[100;5u\x1b[99;1u"));
+    try testing.expectEqual(@as(usize, 0), r.feed("\x1b[99;5:2u\x1b[99;5:3u\x1b[100;5u\x1b[99;1u", 0));
     // Super+Ctrl+C isn't Ctrl-C.
-    try testing.expectEqual(@as(usize, 0), r.feed("\x1b[99;13u"));
+    try testing.expectEqual(@as(usize, 0), r.feed("\x1b[99;13u", 0));
+}
+
+test "CtrlCScanner: a pasted Ctrl-C doesn't count; a paste with no end marker times out" {
+    if (is_windows) return error.SkipZigTest;
+    const lv = testing.log_level;
+    testing.log_level = .err; // the paste timeout's warning
+    defer testing.log_level = lv;
+    const ms = std.time.ns_per_ms;
+    var s: CtrlCScanner = .{};
+    try testing.expectEqual(@as(usize, 0), s.feed("\x1b[200~\x03\x03\x1b[201~", 0));
+    try testing.expectEqual(@as(usize, 1), s.feed("\x03", 10 * ms));
+    // A stray start marker: Ctrl-Cs in it are swallowed until the paste
+    // goes quiet for 500 ms, read timeouts included.
+    s = .{};
+    try testing.expectEqual(@as(usize, 0), s.feed("\x1b[200~\x03", 0));
+    try testing.expectEqual(@as(usize, 0), s.feed("", 400 * ms));
+    try testing.expectEqual(@as(usize, 0), s.feed("", 500 * ms));
+    try testing.expectEqual(@as(usize, 2), s.feed("\x03\x03", 600 * ms));
 }
 
 test "isCtrlCRecord: key-down VK C with either Ctrl" {
